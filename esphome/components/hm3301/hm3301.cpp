@@ -4,17 +4,15 @@
 namespace esphome {
 namespace hm3301 {
 
-static const char *TAG = "hm3301.sensor";
+static const char *const TAG = "hm3301.sensor";
 
 static const uint8_t PM_1_0_VALUE_INDEX = 5;
 static const uint8_t PM_2_5_VALUE_INDEX = 6;
 static const uint8_t PM_10_0_VALUE_INDEX = 7;
 
 void HM3301Component::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up HM3301...");
-  hm3301_ = new HM330X();
-  error_code_ = hm3301_->init();
-  if (error_code_ != NO_ERROR) {
+  if (i2c::ERROR_OK != this->write(&SELECT_COMM_CMD, 1)) {
+    error_code_ = ERROR_COMM;
     this->mark_failed();
     return;
   }
@@ -24,7 +22,7 @@ void HM3301Component::dump_config() {
   ESP_LOGCONFIG(TAG, "HM3301:");
   LOG_I2C_DEVICE(this);
   if (error_code_ == ERROR_COMM) {
-    ESP_LOGE(TAG, "Communication with HM3301 failed!");
+    ESP_LOGE(TAG, ESP_LOG_MSG_COMM_FAIL);
   }
 
   LOG_SENSOR("  ", "PM1.0", this->pm_1_0_sensor_);
@@ -36,7 +34,7 @@ void HM3301Component::dump_config() {
 float HM3301Component::get_setup_priority() const { return setup_priority::DATA; }
 
 void HM3301Component::update() {
-  if (!this->read_sensor_value_(data_buffer_)) {
+  if (this->read(data_buffer_, 29) != i2c::ERROR_OK) {
     ESP_LOGW(TAG, "Read result failed");
     this->status_set_warning();
     return;
@@ -63,7 +61,7 @@ void HM3301Component::update() {
     pm_10_0_value = get_sensor_value_(data_buffer_, PM_10_0_VALUE_INDEX);
   }
 
-  int8_t aqi_value = -1;
+  int16_t aqi_value = -1;
   if (this->aqi_sensor_ != nullptr && pm_2_5_value != -1 && pm_10_0_value != -1) {
     AbstractAQICalculator *calculator = this->aqi_calculator_factory_.get_calculator(this->aqi_calc_type_);
     aqi_value = calculator->get_aqi(pm_2_5_value, pm_10_0_value);
@@ -84,8 +82,6 @@ void HM3301Component::update() {
 
   this->status_clear_warning();
 }
-
-bool HM3301Component::read_sensor_value_(uint8_t *data) { return !hm3301_->read_sensor_value(data, 29); }
 
 bool HM3301Component::validate_checksum_(const uint8_t *data) {
   uint8_t sum = 0;

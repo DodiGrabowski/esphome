@@ -1,12 +1,14 @@
 #pragma once
-
+#include "esphome/core/defines.h"
+#ifdef USE_NETWORK
+#include "esphome/components/socket/socket.h"
 #include "esphome/core/component.h"
 
+#include <cinttypes>
+#include <map>
 #include <memory>
 #include <set>
-#include <map>
-
-class UDP;
+#include <vector>
 
 namespace esphome {
 namespace e131 {
@@ -31,11 +33,9 @@ class E131Component : public esphome::Component {
   void loop() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
- public:
   void add_effect(E131AddressableLightEffect *light_effect);
   void remove_effect(E131AddressableLightEffect *light_effect);
 
- public:
   void set_method(E131ListenMethod listen_method) { this->listen_method_ = listen_method; }
 
  protected:
@@ -45,9 +45,8 @@ class E131Component : public esphome::Component {
   void join_(int universe);
   void leave_(int universe);
 
- protected:
   E131ListenMethod listen_method_{E131_MULTICAST};
-  std::unique_ptr<UDP> udp_;
+  std::unique_ptr<socket::Socket> socket_;
   std::set<E131AddressableLightEffect *> light_effects_;
   std::map<int, int> universe_consumers_;
   std::map<int, E131Packet> universe_packets_;
@@ -55,3 +54,4 @@ class E131Component : public esphome::Component {
 
 }  // namespace e131
 }  // namespace esphome
+#endif

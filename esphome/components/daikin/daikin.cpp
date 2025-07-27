@@ -4,7 +4,7 @@
 namespace esphome {
 namespace daikin {
 
-static const char *TAG = "daikin.climate";
+static const char *const TAG = "daikin.climate";
 
 void DaikinClimate::transmit_state() {
   uint8_t remote_state[35] = {0x11, 0xDA, 0x27, 0x00, 0xC5, 0x00, 0x00, 0xD7, 0x11, 0xDA, 0x27, 0x00,
@@ -23,7 +23,7 @@ void DaikinClimate::transmit_state() {
   }
 
   auto transmit = this->transmitter_->transmit();
-  auto data = transmit.get_data();
+  auto *data = transmit.get_data();
   data->set_carrier_frequency(DAIKIN_IR_FREQUENCY);
 
   data->mark(DAIKIN_HEADER_MARK);
@@ -65,7 +65,7 @@ void DaikinClimate::transmit_state() {
   transmit.perform();
 }
 
-uint8_t DaikinClimate::operation_mode_() {
+uint8_t DaikinClimate::operation_mode_() const {
   uint8_t operating_mode = DAIKIN_MODE_ON;
   switch (this->mode) {
     case climate::CLIMATE_MODE_COOL:
@@ -77,7 +77,7 @@ uint8_t DaikinClimate::operation_mode_() {
     case climate::CLIMATE_MODE_HEAT:
       operating_mode |= DAIKIN_MODE_HEAT;
       break;
-    case climate::CLIMATE_MODE_AUTO:
+    case climate::CLIMATE_MODE_HEAT_COOL:
       operating_mode |= DAIKIN_MODE_AUTO;
       break;
     case climate::CLIMATE_MODE_FAN_ONLY:
@@ -92,9 +92,12 @@ uint8_t DaikinClimate::operation_mode_() {
   return operating_mode;
 }
 
-uint16_t DaikinClimate::fan_speed_() {
+uint16_t DaikinClimate::fan_speed_() const {
   uint16_t fan_speed;
-  switch (this->fan_mode) {
+  switch (this->fan_mode.value()) {
+    case climate::CLIMATE_FAN_QUIET:
+      fan_speed = DAIKIN_FAN_SILENT << 8;
+      break;
     case climate::CLIMATE_FAN_LOW:
       fan_speed = DAIKIN_FAN_1 << 8;
       break;
@@ -126,16 +129,15 @@ uint16_t DaikinClimate::fan_speed_() {
   return fan_speed;
 }
 
-uint8_t DaikinClimate::temperature_() {
+uint8_t DaikinClimate::temperature_() const {
   // Force special temperatures depending on the mode
   switch (this->mode) {
     case climate::CLIMATE_MODE_FAN_ONLY:
       return 0x32;
-    case climate::CLIMATE_MODE_AUTO:
     case climate::CLIMATE_MODE_DRY:
       return 0xc0;
     default:
-      uint8_t temperature = (uint8_t) roundf(clamp(this->target_temperature, DAIKIN_TEMP_MIN, DAIKIN_TEMP_MAX));
+      uint8_t temperature = (uint8_t) roundf(clamp<float>(this->target_temperature, DAIKIN_TEMP_MIN, DAIKIN_TEMP_MAX));
       return temperature << 1;
   }
 }
@@ -148,19 +150,25 @@ bool DaikinClimate::parse_state_frame_(const uint8_t frame[]) {
   if (frame[DAIKIN_STATE_FRAME_SIZE - 1] != checksum)
     return false;
   uint8_t mode = frame[5];
+  // Temperature is given in degrees celcius * 2
+  // only update for states that use the temperature
+  uint8_t temperature = frame[6];
   if (mode & DAIKIN_MODE_ON) {
     switch (mode & 0xF0) {
       case DAIKIN_MODE_COOL:
         this->mode = climate::CLIMATE_MODE_COOL;
+        this->target_temperature = static_cast<float>(temperature * 0.5f);
         break;
       case DAIKIN_MODE_DRY:
         this->mode = climate::CLIMATE_MODE_DRY;
         break;
       case DAIKIN_MODE_HEAT:
         this->mode = climate::CLIMATE_MODE_HEAT;
+        this->target_temperature = static_cast<float>(temperature * 0.5f);
         break;
       case DAIKIN_MODE_AUTO:
-        this->mode = climate::CLIMATE_MODE_AUTO;
+        this->mode = climate::CLIMATE_MODE_HEAT_COOL;
+        this->target_temperature = static_cast<float>(temperature * 0.5f);
         break;
       case DAIKIN_MODE_FAN:
         this->mode = climate::CLIMATE_MODE_FAN_ONLY;
@@ -169,24 +177,20 @@ bool DaikinClimate::parse_state_frame_(const uint8_t frame[]) {
   } else {
     this->mode = climate::CLIMATE_MODE_OFF;
   }
-  uint8_t temperature = frame[6];
-  if (!(temperature & 0xC0)) {
-    this->target_temperature = temperature >> 1;
-  }
   uint8_t fan_mode = frame[8];
   uint8_t swing_mode = frame[9];
-  if (fan_mode & 0xF && swing_mode & 0xF)
+  if (fan_mode & 0xF && swing_mode & 0xF) {
     this->swing_mode = climate::CLIMATE_SWING_BOTH;
-  else if (fan_mode & 0xF)
+  } else if (fan_mode & 0xF) {
     this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
-  else if (swing_mode & 0xF)
+  } else if (swing_mode & 0xF) {
     this->swing_mode = climate::CLIMATE_SWING_HORIZONTAL;
-  else
+  } else {
     this->swing_mode = climate::CLIMATE_SWING_OFF;
+  }
   switch (fan_mode & 0xF0) {
     case DAIKIN_FAN_1:
     case DAIKIN_FAN_2:
-    case DAIKIN_FAN_SILENT:
       this->fan_mode = climate::CLIMATE_FAN_LOW;
       break;
     case DAIKIN_FAN_3:
@@ -198,6 +202,9 @@ bool DaikinClimate::parse_state_frame_(const uint8_t frame[]) {
       break;
     case DAIKIN_FAN_AUTO:
       this->fan_mode = climate::CLIMATE_FAN_AUTO;
+      break;
+    case DAIKIN_FAN_SILENT:
+      this->fan_mode = climate::CLIMATE_FAN_QUIET;
       break;
   }
   this->publish_state();
@@ -212,9 +219,9 @@ bool DaikinClimate::on_receive(remote_base::RemoteReceiveData data) {
   for (uint8_t pos = 0; pos < DAIKIN_STATE_FRAME_SIZE; pos++) {
     uint8_t byte = 0;
     for (int8_t bit = 0; bit < 8; bit++) {
-      if (data.expect_item(DAIKIN_BIT_MARK, DAIKIN_ONE_SPACE))
+      if (data.expect_item(DAIKIN_BIT_MARK, DAIKIN_ONE_SPACE)) {
         byte |= 1 << bit;
-      else if (!data.expect_item(DAIKIN_BIT_MARK, DAIKIN_ZERO_SPACE)) {
+      } else if (!data.expect_item(DAIKIN_BIT_MARK, DAIKIN_ZERO_SPACE)) {
         return false;
       }
     }
@@ -231,7 +238,7 @@ bool DaikinClimate::on_receive(remote_base::RemoteReceiveData data) {
       // frame header
       if (byte != 0x27)
         return false;
-    } else if (pos == 3) {
+    } else if (pos == 3) {  // NOLINT(bugprone-branch-clone)
       // frame header
       if (byte != 0x00)
         return false;

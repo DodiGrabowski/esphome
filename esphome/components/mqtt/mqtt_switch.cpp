@@ -1,16 +1,19 @@
 #include "mqtt_switch.h"
 #include "esphome/core/log.h"
 
+#include "mqtt_const.h"
+
+#ifdef USE_MQTT
 #ifdef USE_SWITCH
 
 namespace esphome {
 namespace mqtt {
 
-static const char *TAG = "mqtt.switch";
+static const char *const TAG = "mqtt.switch";
 
 using namespace esphome::switch_;
 
-MQTTSwitchComponent::MQTTSwitchComponent(switch_::Switch *a_switch) : MQTTComponent(), switch_(a_switch) {}
+MQTTSwitchComponent::MQTTSwitchComponent(switch_::Switch *a_switch) : switch_(a_switch) {}
 
 void MQTTSwitchComponent::setup() {
   this->subscribe(this->get_command_topic_(), [this](const std::string &topic, const std::string &payload) {
@@ -40,15 +43,15 @@ void MQTTSwitchComponent::dump_config() {
 }
 
 std::string MQTTSwitchComponent::component_type() const { return "switch"; }
-void MQTTSwitchComponent::send_discovery(JsonObject &root, mqtt::SendDiscoveryConfig &config) {
-  if (!this->switch_->get_icon().empty())
-    root["icon"] = this->switch_->get_icon();
-  if (this->switch_->assumed_state())
-    root["optimistic"] = true;
+const EntityBase *MQTTSwitchComponent::get_entity() const { return this->switch_; }
+void MQTTSwitchComponent::send_discovery(JsonObject root, mqtt::SendDiscoveryConfig &config) {
+  // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks) false positive with ArduinoJson
+  if (this->switch_->assumed_state()) {
+    root[MQTT_OPTIMISTIC] = true;
+  }
 }
 bool MQTTSwitchComponent::send_initial_state() { return this->publish_state(this->switch_->state); }
-bool MQTTSwitchComponent::is_internal() { return this->switch_->is_internal(); }
-std::string MQTTSwitchComponent::friendly_name() const { return this->switch_->get_name(); }
+
 bool MQTTSwitchComponent::publish_state(bool state) {
   const char *state_s = state ? "ON" : "OFF";
   return this->publish(this->get_state_topic_(), state_s);
@@ -58,3 +61,4 @@ bool MQTTSwitchComponent::publish_state(bool state) {
 }  // namespace esphome
 
 #endif
+#endif  // USE_MQTT

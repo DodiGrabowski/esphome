@@ -1,129 +1,77 @@
 #include "json_util.h"
 #include "esphome/core/log.h"
 
+// ArduinoJson::Allocator is included via ArduinoJson.h in json_util.h
+
 namespace esphome {
 namespace json {
 
-static const char *TAG = "json";
+static const char *const TAG = "json";
 
-static char *global_json_build_buffer = nullptr;
-static size_t global_json_build_buffer_size = 0;
+// Build an allocator for the JSON Library using the RAMAllocator class
+struct SpiRamAllocator : ArduinoJson::Allocator {
+  void *allocate(size_t size) override { return this->allocator_.allocate(size); }
 
-void reserve_global_json_build_buffer(size_t required_size) {
-  if (global_json_build_buffer_size == 0 || global_json_build_buffer_size < required_size) {
-    delete[] global_json_build_buffer;
-    global_json_build_buffer_size = std::max(required_size, global_json_build_buffer_size * 2);
-
-    size_t remainder = global_json_build_buffer_size % 16U;
-    if (remainder != 0)
-      global_json_build_buffer_size += 16 - remainder;
-
-    global_json_build_buffer = new char[global_json_build_buffer_size];
-  }
-}
-
-const char *build_json(const json_build_t &f, size_t *length) {
-  global_json_buffer.clear();
-  JsonObject &root = global_json_buffer.createObject();
-
-  f(root);
-
-  // The Json buffer size gives us a good estimate for the required size.
-  // Usually, it's a bit larger than the actual required string size
-  //             | JSON Buffer Size | String Size |
-  // Discovery   | 388              | 351         |
-  // Discovery   | 372              | 356         |
-  // Discovery   | 336              | 311         |
-  // Discovery   | 408              | 393         |
-  reserve_global_json_build_buffer(global_json_buffer.size());
-  size_t bytes_written = root.printTo(global_json_build_buffer, global_json_build_buffer_size);
-
-  if (bytes_written >= global_json_build_buffer_size - 1) {
-    reserve_global_json_build_buffer(root.measureLength() + 1);
-    bytes_written = root.printTo(global_json_build_buffer, global_json_build_buffer_size);
+  void deallocate(void *pointer) override {
+    // ArduinoJson's Allocator interface doesn't provide the size parameter in deallocate.
+    // RAMAllocator::deallocate() requires the size, which we don't have access to here.
+    // RAMAllocator::deallocate implementation just calls free() regardless of whether
+    // the memory was allocated with heap_caps_malloc or malloc.
+    // This is safe because ESP-IDF's heap implementation internally tracks the memory region
+    // and routes free() to the appropriate heap.
+    free(pointer);  // NOLINT(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
   }
 
-  *length = bytes_written;
-  return global_json_build_buffer;
-}
-void parse_json(const std::string &data, const json_parse_t &f) {
-  global_json_buffer.clear();
-  JsonObject &root = global_json_buffer.parseObject(data);
-
-  if (!root.success()) {
-    ESP_LOGW(TAG, "Parsing JSON failed.");
-    return;
+  void *reallocate(void *ptr, size_t new_size) override {
+    return this->allocator_.reallocate(static_cast<uint8_t *>(ptr), new_size);
   }
 
-  f(root);
-}
+ protected:
+  RAMAllocator<uint8_t> allocator_{RAMAllocator<uint8_t>(RAMAllocator<uint8_t>::NONE)};
+};
+
 std::string build_json(const json_build_t &f) {
-  size_t len;
-  const char *c_str = build_json(f, &len);
-  return std::string(c_str, len);
-}
-
-VectorJsonBuffer::String::String(VectorJsonBuffer *parent) : parent_(parent), start_(parent->size_) {}
-void VectorJsonBuffer::String::append(char c) const {
-  char *last = static_cast<char *>(this->parent_->do_alloc(1));
-  *last = c;
-}
-const char *VectorJsonBuffer::String::c_str() const {
-  this->append('\0');
-  return &this->parent_->buffer_[this->start_];
-}
-void VectorJsonBuffer::clear() {
-  for (char *block : this->free_blocks_)
-    free(block);  // NOLINT
-
-  this->size_ = 0;
-  this->free_blocks_.clear();
-}
-VectorJsonBuffer::String VectorJsonBuffer::startString() { return {this}; }  // NOLINT
-void *VectorJsonBuffer::alloc(size_t bytes) {
-  // Make sure memory addresses are aligned
-  uint32_t new_size = round_size_up(this->size_);
-  this->resize(new_size);
-  return this->do_alloc(bytes);
-}
-void *VectorJsonBuffer::do_alloc(size_t bytes) {  // NOLINT
-  const uint32_t begin = this->size_;
-  this->resize(begin + bytes);
-  return &this->buffer_[begin];
-}
-void VectorJsonBuffer::resize(size_t size) {  // NOLINT
-  if (size <= this->size_) {
-    this->size_ = size;
-    return;
+  // NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks) false positive with ArduinoJson
+  auto doc_allocator = SpiRamAllocator();
+  JsonDocument json_document(&doc_allocator);
+  if (json_document.overflowed()) {
+    ESP_LOGE(TAG, "Could not allocate memory for JSON document!");
+    return "{}";
   }
-
-  this->reserve(size);
-  this->size_ = size;
-}
-void VectorJsonBuffer::reserve(size_t size) {  // NOLINT
-  if (size <= this->capacity_)
-    return;
-
-  uint32_t target_capacity = this->capacity_;
-  if (this->capacity_ == 0) {
-    // lazily initialize with a reasonable size
-    target_capacity = JSON_OBJECT_SIZE(16);
+  JsonObject root = json_document.to<JsonObject>();
+  f(root);
+  if (json_document.overflowed()) {
+    ESP_LOGE(TAG, "Could not allocate memory for JSON document!");
+    return "{}";
   }
-  while (target_capacity < size)
-    target_capacity *= 2;
-
-  char *old_buffer = this->buffer_;
-  this->buffer_ = new char[target_capacity];
-  if (old_buffer != nullptr && this->capacity_ != 0) {
-    this->free_blocks_.push_back(old_buffer);
-    memcpy(this->buffer_, old_buffer, this->capacity_);
-  }
-  this->capacity_ = target_capacity;
+  std::string output;
+  serializeJson(json_document, output);
+  return output;
+  // NOLINTEND(clang-analyzer-cplusplus.NewDeleteLeaks)
 }
 
-size_t VectorJsonBuffer::size() const { return this->size_; }
+bool parse_json(const std::string &data, const json_parse_t &f) {
+  // NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks) false positive with ArduinoJson
+  auto doc_allocator = SpiRamAllocator();
+  JsonDocument json_document(&doc_allocator);
+  if (json_document.overflowed()) {
+    ESP_LOGE(TAG, "Could not allocate memory for JSON document!");
+    return false;
+  }
+  DeserializationError err = deserializeJson(json_document, data);
 
-VectorJsonBuffer global_json_buffer;
+  JsonObject root = json_document.as<JsonObject>();
+
+  if (err == DeserializationError::Ok) {
+    return f(root);
+  } else if (err == DeserializationError::NoMemory) {
+    ESP_LOGE(TAG, "Can not allocate more memory for deserialization. Consider making source string smaller");
+    return false;
+  }
+  ESP_LOGE(TAG, "Parse error: %s", err.c_str());
+  return false;
+  // NOLINTEND(clang-analyzer-cplusplus.NewDeleteLeaks)
+}
 
 }  // namespace json
 }  // namespace esphome

@@ -2,15 +2,16 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/automation.h"
-#include "esphome/components/stepper/stepper.h"
 
 namespace esphome {
 namespace stepper {
 
 #define LOG_STEPPER(this) \
-  ESP_LOGCONFIG(TAG, "  Acceleration: %.0f steps/s^2", this->acceleration_); \
-  ESP_LOGCONFIG(TAG, "  Deceleration: %.0f steps/s^2", this->deceleration_); \
-  ESP_LOGCONFIG(TAG, "  Max Speed: %.0f steps/s", this->max_speed_);
+  ESP_LOGCONFIG(TAG, \
+                "  Acceleration: %.0f steps/s^2\n" \
+                "  Deceleration: %.0f steps/s^2\n" \
+                "  Max Speed: %.0f steps/s", \
+                this->acceleration_, this->deceleration_, this->max_speed_);
 
 class Stepper {
  public:
@@ -71,6 +72,36 @@ template<typename... Ts> class SetSpeedAction : public Action<Ts...> {
     float speed = this->speed_.value(x...);
     this->parent_->set_max_speed(speed);
     this->parent_->on_update_speed();
+  }
+
+ protected:
+  Stepper *parent_;
+};
+
+template<typename... Ts> class SetAccelerationAction : public Action<Ts...> {
+ public:
+  explicit SetAccelerationAction(Stepper *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(float, acceleration);
+
+  void play(Ts... x) override {
+    float acceleration = this->acceleration_.value(x...);
+    this->parent_->set_acceleration(acceleration);
+  }
+
+ protected:
+  Stepper *parent_;
+};
+
+template<typename... Ts> class SetDecelerationAction : public Action<Ts...> {
+ public:
+  explicit SetDecelerationAction(Stepper *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(float, deceleration);
+
+  void play(Ts... x) override {
+    float deceleration = this->deceleration_.value(x...);
+    this->parent_->set_deceleration(deceleration);
   }
 
  protected:

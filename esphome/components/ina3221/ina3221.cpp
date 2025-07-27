@@ -1,10 +1,11 @@
 #include "ina3221.h"
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h"
 
 namespace esphome {
 namespace ina3221 {
 
-static const char *TAG = "ina3221";
+static const char *const TAG = "ina3221";
 
 static const uint8_t INA3221_REGISTER_CONFIG = 0x00;
 static const uint8_t INA3221_REGISTER_CHANNEL1_SHUNT_VOLTAGE = 0x01;
@@ -21,7 +22,6 @@ static const uint8_t INA3221_REGISTER_CHANNEL3_BUS_VOLTAGE = 0x06;
 // A0 = SCL -> 0x43
 
 void INA3221Component::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up INA3221...");
   // Config Register
   // 0bx000000000000000 << 15 RESET Bit (1 -> trigger reset)
   if (!this->write_byte_16(INA3221_REGISTER_CONFIG, 0x8000)) {
@@ -59,7 +59,7 @@ void INA3221Component::dump_config() {
   ESP_LOGCONFIG(TAG, "INA3221:");
   LOG_I2C_DEVICE(this);
   if (this->is_failed()) {
-    ESP_LOGE(TAG, "Communication with INA3221 failed!");
+    ESP_LOGE(TAG, ESP_LOG_MSG_COMM_FAIL);
   }
   LOG_UPDATE_INTERVAL(this);
 
@@ -87,7 +87,7 @@ void INA3221Component::update() {
     float bus_voltage_v = NAN, current_a = NAN;
     uint16_t raw;
     if (channel.should_measure_bus_voltage()) {
-      if (!this->read_byte_16(ina3221_bus_voltage_register(i), &raw, 1)) {
+      if (!this->read_byte_16(ina3221_bus_voltage_register(i), &raw)) {
         this->status_set_warning();
         return;
       }
@@ -96,7 +96,7 @@ void INA3221Component::update() {
         channel.bus_voltage_sensor_->publish_state(bus_voltage_v);
     }
     if (channel.should_measure_shunt_voltage()) {
-      if (!this->read_byte_16(ina3221_shunt_voltage_register(i), &raw, 1)) {
+      if (!this->read_byte_16(ina3221_shunt_voltage_register(i), &raw)) {
         this->status_set_warning();
         return;
       }

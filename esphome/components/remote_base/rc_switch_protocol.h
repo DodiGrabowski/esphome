@@ -15,6 +15,8 @@ struct RCSwitchData {
 
 class RCSwitchBase {
  public:
+  using ProtocolData = RCSwitchData;
+
   RCSwitchBase() = default;
   RCSwitchBase(uint32_t sync_high, uint32_t sync_low, uint32_t zero_high, uint32_t zero_low, uint32_t one_high,
                uint32_t one_low, bool inverted);
@@ -60,7 +62,7 @@ class RCSwitchBase {
   bool inverted_{};
 };
 
-extern RCSwitchBase rc_switch_protocols[9];
+extern const RCSwitchBase RC_SWITCH_PROTOCOLS[9];
 
 uint64_t decode_binary_string(const std::string &data);
 
@@ -213,7 +215,7 @@ class RCSwitchDumper : public RemoteReceiverDumperBase {
   bool dump(RemoteReceiveData src) override;
 };
 
-using RCSwitchTrigger = RemoteReceiverTrigger<RCSwitchBase, RCSwitchData>;
+using RCSwitchTrigger = RemoteReceiverTrigger<RCSwitchBase>;
 
 }  // namespace remote_base
 }  // namespace esphome

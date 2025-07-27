@@ -1,14 +1,20 @@
+#include <cstring>
 #include "e131.h"
+#ifdef USE_NETWORK
+#include "esphome/components/network/ip_address.h"
 #include "esphome/core/log.h"
 #include "esphome/core/util.h"
+#include "esphome/core/helpers.h"
 
-#include <lwip/ip_addr.h>
 #include <lwip/igmp.h>
+#include <lwip/init.h>
+#include <lwip/ip4_addr.h>
+#include <lwip/ip_addr.h>
 
 namespace esphome {
 namespace e131 {
 
-static const char *TAG = "e131";
+static const char *const TAG = "e131";
 
 static const uint8_t ACN_ID[12] = {0x41, 0x53, 0x43, 0x2d, 0x45, 0x31, 0x2e, 0x31, 0x37, 0x00, 0x00, 0x00};
 static const uint32_t VECTOR_ROOT = 4;
@@ -51,22 +57,26 @@ union E131RawPacket {
 
 // We need to have at least one `1` value
 // Get the offset of `property_values[1]`
-const long E131_MIN_PACKET_SIZE = reinterpret_cast<long>(&((E131RawPacket *) nullptr)->property_values[1]);
+const size_t E131_MIN_PACKET_SIZE = reinterpret_cast<size_t>(&((E131RawPacket *) nullptr)->property_values[1]);
 
 bool E131Component::join_igmp_groups_() {
   if (listen_method_ != E131_MULTICAST)
     return false;
-  if (!udp_)
+  if (this->socket_ == nullptr)
     return false;
 
   for (auto universe : universe_consumers_) {
     if (!universe.second)
       continue;
 
-    ip4_addr_t multicast_addr = {
-        static_cast<uint32_t>(IPAddress(239, 255, ((universe.first >> 8) & 0xff), ((universe.first >> 0) & 0xff)))};
+    ip4_addr_t multicast_addr =
+        network::IPAddress(239, 255, ((universe.first >> 8) & 0xff), ((universe.first >> 0) & 0xff));
 
-    auto err = igmp_joingroup(IP4_ADDR_ANY4, &multicast_addr);
+    err_t err;
+    {
+      LwIPLock lock;
+      err = igmp_joingroup(IP4_ADDR_ANY4, &multicast_addr);
+    }
 
     if (err) {
       ESP_LOGW(TAG, "IGMP join for %d universe of E1.31 failed. Multicast might not work.", universe.first);
@@ -97,9 +107,9 @@ void E131Component::leave_(int universe) {
   }
 
   if (listen_method_ == E131_MULTICAST) {
-    ip4_addr_t multicast_addr = {
-        static_cast<uint32_t>(IPAddress(239, 255, ((universe >> 8) & 0xff), ((universe >> 0) & 0xff)))};
+    ip4_addr_t multicast_addr = network::IPAddress(239, 255, ((universe >> 8) & 0xff), ((universe >> 0) & 0xff));
 
+    LwIPLock lock;
     igmp_leavegroup(IP4_ADDR_ANY4, &multicast_addr);
   }
 
@@ -110,7 +120,7 @@ bool E131Component::packet_(const std::vector<uint8_t> &data, int &universe, E13
   if (data.size() < E131_MIN_PACKET_SIZE)
     return false;
 
-  auto sbuff = reinterpret_cast<const E131RawPacket *>(&data[0]);
+  auto *sbuff = reinterpret_cast<const E131RawPacket *>(&data[0]);
 
   if (memcmp(sbuff->acn_id, ACN_ID, sizeof(sbuff->acn_id)) != 0)
     return false;
@@ -134,3 +144,4 @@ bool E131Component::packet_(const std::vector<uint8_t> &data, int &universe, E13
 
 }  // namespace e131
 }  // namespace esphome
+#endif

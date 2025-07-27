@@ -6,7 +6,7 @@
 #include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
 #include "esphome/components/xiaomi_ble/xiaomi_ble.h"
 
-#ifdef ARDUINO_ARCH_ESP32
+#ifdef USE_ESP32
 
 namespace esphome {
 namespace xiaomi_mjyd02yla {
@@ -21,7 +21,6 @@ class XiaomiMJYD02YLA : public Component,
   bool parse_device(const esp32_ble_tracker::ESPBTDevice &device) override;
 
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::DATA; }
   void set_idle_time(sensor::Sensor *idle_time) { idle_time_ = idle_time; }
   void set_battery_level(sensor::Sensor *battery_level) { battery_level_ = battery_level; }
   void set_illuminance(sensor::Sensor *illuminance) { illuminance_ = illuminance; }

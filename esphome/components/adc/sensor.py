@@ -1,48 +1,124 @@
+import logging
+
 import esphome.codegen as cg
-import esphome.config_validation as cv
-from esphome import pins
 from esphome.components import sensor, voltage_sampler
-from esphome.const import CONF_ATTENUATION, CONF_ID, CONF_PIN, ICON_FLASH, UNIT_VOLT
+from esphome.components.esp32 import get_esp32_variant
+import esphome.config_validation as cv
+from esphome.const import (
+    CONF_ATTENUATION,
+    CONF_ID,
+    CONF_NUMBER,
+    CONF_PIN,
+    CONF_RAW,
+    DEVICE_CLASS_VOLTAGE,
+    STATE_CLASS_MEASUREMENT,
+    UNIT_VOLT,
+)
+from esphome.core import CORE
+
+from . import (
+    ATTENUATION_MODES,
+    ESP32_VARIANT_ADC1_PIN_TO_CHANNEL,
+    ESP32_VARIANT_ADC2_PIN_TO_CHANNEL,
+    SAMPLING_MODES,
+    adc_ns,
+    adc_unit_t,
+    validate_adc_pin,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+AUTO_LOAD = ["voltage_sampler"]
+
+CONF_SAMPLES = "samples"
+CONF_SAMPLING_MODE = "sampling_mode"
 
 
-AUTO_LOAD = ['voltage_sampler']
-
-ATTENUATION_MODES = {
-    '0db': cg.global_ns.ADC_0db,
-    '2.5db': cg.global_ns.ADC_2_5db,
-    '6db': cg.global_ns.ADC_6db,
-    '11db': cg.global_ns.ADC_11db,
-}
+_attenuation = cv.enum(ATTENUATION_MODES, lower=True)
+_sampling_mode = cv.enum(SAMPLING_MODES, lower=True)
 
 
-def validate_adc_pin(value):
-    vcc = str(value).upper()
-    if vcc == 'VCC':
-        return cv.only_on_esp8266(vcc)
-    return pins.analog_pin(value)
+def validate_config(config):
+    if config[CONF_RAW] and config.get(CONF_ATTENUATION, None) == "auto":
+        raise cv.Invalid("Automatic attenuation cannot be used when raw output is set")
+
+    if config.get(CONF_ATTENUATION, None) == "auto" and config.get(CONF_SAMPLES, 1) > 1:
+        raise cv.Invalid(
+            "Automatic attenuation cannot be used when multisampling is set"
+        )
+    if config.get(CONF_ATTENUATION) == "11db":
+        _LOGGER.warning(
+            "`attenuation: 11db` is deprecated, use `attenuation: 12db` instead"
+        )
+        # Alter value here so `config` command prints the recommended change
+        config[CONF_ATTENUATION] = _attenuation("12db")
+
+    return config
 
 
-adc_ns = cg.esphome_ns.namespace('adc')
-ADCSensor = adc_ns.class_('ADCSensor', sensor.Sensor, cg.PollingComponent,
-                          voltage_sampler.VoltageSampler)
+ADCSensor = adc_ns.class_(
+    "ADCSensor", sensor.Sensor, cg.PollingComponent, voltage_sampler.VoltageSampler
+)
 
-CONFIG_SCHEMA = sensor.sensor_schema(UNIT_VOLT, ICON_FLASH, 2).extend({
-    cv.GenerateID(): cv.declare_id(ADCSensor),
-    cv.Required(CONF_PIN): validate_adc_pin,
-    cv.SplitDefault(CONF_ATTENUATION, esp32='0db'):
-        cv.All(cv.only_on_esp32, cv.enum(ATTENUATION_MODES, lower=True)),
-}).extend(cv.polling_component_schema('60s'))
+CONFIG_SCHEMA = cv.All(
+    sensor.sensor_schema(
+        ADCSensor,
+        unit_of_measurement=UNIT_VOLT,
+        accuracy_decimals=2,
+        device_class=DEVICE_CLASS_VOLTAGE,
+        state_class=STATE_CLASS_MEASUREMENT,
+    )
+    .extend(
+        {
+            cv.Required(CONF_PIN): validate_adc_pin,
+            cv.Optional(CONF_RAW, default=False): cv.boolean,
+            cv.SplitDefault(CONF_ATTENUATION, esp32="0db"): cv.All(
+                cv.only_on_esp32, _attenuation
+            ),
+            cv.Optional(CONF_SAMPLES, default=1): cv.int_range(min=1, max=255),
+            cv.Optional(CONF_SAMPLING_MODE, default="avg"): _sampling_mode,
+        }
+    )
+    .extend(cv.polling_component_schema("60s")),
+    validate_config,
+)
 
 
-def to_code(config):
+async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
-    yield cg.register_component(var, config)
-    yield sensor.register_sensor(var, config)
+    await cg.register_component(var, config)
+    await sensor.register_sensor(var, config)
 
-    if config[CONF_PIN] == 'VCC':
-        cg.add_define('USE_ADC_SENSOR_VCC')
+    if config[CONF_PIN] == "VCC":
+        cg.add_define("USE_ADC_SENSOR_VCC")
+    elif config[CONF_PIN] == "TEMPERATURE":
+        cg.add(var.set_is_temperature())
     else:
-        cg.add(var.set_pin(config[CONF_PIN]))
+        pin = await cg.gpio_pin_expression(config[CONF_PIN])
+        cg.add(var.set_pin(pin))
 
-    if CONF_ATTENUATION in config:
-        cg.add(var.set_attenuation(config[CONF_ATTENUATION]))
+    cg.add(var.set_output_raw(config[CONF_RAW]))
+    cg.add(var.set_sample_count(config[CONF_SAMPLES]))
+    cg.add(var.set_sampling_mode(config[CONF_SAMPLING_MODE]))
+
+    if CORE.is_esp32:
+        if attenuation := config.get(CONF_ATTENUATION):
+            if attenuation == "auto":
+                cg.add(var.set_autorange(cg.global_ns.true))
+            else:
+                cg.add(var.set_attenuation(attenuation))
+
+        variant = get_esp32_variant()
+        pin_num = config[CONF_PIN][CONF_NUMBER]
+        if (
+            variant in ESP32_VARIANT_ADC1_PIN_TO_CHANNEL
+            and pin_num in ESP32_VARIANT_ADC1_PIN_TO_CHANNEL[variant]
+        ):
+            chan = ESP32_VARIANT_ADC1_PIN_TO_CHANNEL[variant][pin_num]
+            cg.add(var.set_channel(adc_unit_t.ADC_UNIT_1, chan))
+        elif (
+            variant in ESP32_VARIANT_ADC2_PIN_TO_CHANNEL
+            and pin_num in ESP32_VARIANT_ADC2_PIN_TO_CHANNEL[variant]
+        ):
+            chan = ESP32_VARIANT_ADC2_PIN_TO_CHANNEL[variant][pin_num]
+            cg.add(var.set_channel(adc_unit_t.ADC_UNIT_2, chan))

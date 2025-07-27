@@ -1,327 +1,261 @@
+---
 name: Publish Release
 
 on:
+  workflow_dispatch:
   release:
     types: [published]
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
 
 jobs:
-  # THE LINT/TEST JOBS ARE COPIED FROM ci.yaml
-
-  lint-clang-format:
+  init:
+    name: Initialize build
     runs-on: ubuntu-latest
-    # cpp lint job runs with esphome-lint docker image so that clang-format-*
-    # doesn't have to be installed
-    container: esphome/esphome-lint:latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      branch_build: ${{ steps.tag.outputs.branch_build }}
+      deploy_env: ${{ steps.tag.outputs.deploy_env }}
     steps:
-      - uses: actions/checkout@v2
-      # Cache platformio intermediary files (like libraries etc)
-      # Note: platformio platform versions should be cached via the esphome-lint image
-      - name: Cache Platformio
-        uses: actions/cache@v1
-        with:
-          path: .pio
-          key: lint-cpp-pio-${{ hashFiles('platformio.ini') }}
-          restore-keys: |
-            lint-cpp-pio-
-      # Set up the pio project so that the cpp checks know how files are compiled
-      # (build flags, libraries etc)
-      - name: Set up platformio environment
-        run: pio init --ide atom
-
-      - name: Run clang-format
-        run: script/clang-format -i
-      - name: Suggest changes
-        run: script/ci-suggest-changes
-
-  lint-clang-tidy:
-    runs-on: ubuntu-latest
-    # cpp lint job runs with esphome-lint docker image so that clang-format-*
-    # doesn't have to be installed
-    container: esphome/esphome-lint:latest
-    # Split clang-tidy check into 4 jobs. Each one will check 1/4th of the .cpp files
-    strategy:
-      fail-fast: false
-      matrix:
-        split: [1, 2, 3, 4]
-    steps:
-      - uses: actions/checkout@v2
-      # Cache platformio intermediary files (like libraries etc)
-      # Note: platformio platform versions should be cached via the esphome-lint image
-      - name: Cache Platformio
-        uses: actions/cache@v1
-        with:
-          path: .pio
-          key: lint-cpp-pio-${{ hashFiles('platformio.ini') }}
-          restore-keys: |
-            lint-cpp-pio-
-      # Set up the pio project so that the cpp checks know how files are compiled
-      # (build flags, libraries etc)
-      - name: Set up platformio environment
-        run: pio init --ide atom
-
-
-      - name: Register problem matchers
+      - uses: actions/checkout@v4.2.2
+      - name: Get tag
+        id: tag
+        # yamllint disable rule:line-length
         run: |
-          echo "::add-matcher::.github/workflows/matchers/clang-tidy.json"
-          echo "::add-matcher::.github/workflows/matchers/gcc.json"
-      - name: Run clang-tidy
-        run: script/clang-tidy --all-headers --fix --split-num 4 --split-at ${{ matrix.split }}
-      - name: Suggest changes
-        run: script/ci-suggest-changes
-
-  lint-python:
-    # Don't use the esphome-lint docker image because it may contain outdated requirements.
-    # This way, all dependencies are cached via the cache action.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Set up Python
-        uses: actions/setup-python@v2
-        with:
-          python-version: '3.7'
-      - name: Cache pip modules
-        uses: actions/cache@v1
-        with:
-          path: ~/.cache/pip
-          key: esphome-pip-3.7-${{ hashFiles('setup.py') }}
-          restore-keys: |
-            esphome-pip-3.7-
-      - name: Set up python environment
-        run: script/setup
-
-      - name: Register problem matchers
-        run: |
-          echo "::add-matcher::.github/workflows/matchers/ci-custom.json"
-          echo "::add-matcher::.github/workflows/matchers/lint-python.json"
-          echo "::add-matcher::.github/workflows/matchers/python.json"
-      - name: Lint Custom
-        run: script/ci-custom.py
-      - name: Lint Python
-        run: script/lint-python
-      - name: Lint CODEOWNERS
-        run: script/build_codeowners.py --check
-
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-          test:
-          - test1
-          - test2
-          - test3
-          - test4
-    steps:
-      - uses: actions/checkout@v2
-      - name: Set up Python
-        uses: actions/setup-python@v2
-        with:
-          python-version: '3.7'
-      - name: Cache pip modules
-        uses: actions/cache@v1
-        with:
-          path: ~/.cache/pip
-          key: esphome-pip-3.7-${{ hashFiles('setup.py') }}
-          restore-keys: |
-            esphome-pip-3.7-
-      # Use per test platformio cache because tests have different platform versions
-      - name: Cache ~/.platformio
-        uses: actions/cache@v1
-        with:
-          path: ~/.platformio
-          key: test-home-platformio-${{ matrix.test }}-${{ hashFiles('esphome/core_config.py') }}
-          restore-keys: |
-            test-home-platformio-${{ matrix.test }}-
-      - name: Set up environment
-        run: script/setup
-
-      - name: Register problem matchers
-        run: |
-          echo "::add-matcher::.github/workflows/matchers/gcc.json"
-          echo "::add-matcher::.github/workflows/matchers/python.json"
-      - run: esphome tests/${{ matrix.test }}.yaml compile
-
-  pytest:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Set up Python
-        uses: actions/setup-python@v2
-        with:
-          python-version: '3.7'
-      - name: Cache pip modules
-        uses: actions/cache@v1
-        with:
-          path: ~/.cache/pip
-          key: esphome-pip-3.7-${{ hashFiles('setup.py') }}
-          restore-keys: |
-            esphome-pip-3.7-
-      - name: Set up environment
-        run: script/setup
-      - name: Install Github Actions annotator
-        run: pip install pytest-github-actions-annotate-failures
-
-      - name: Register problem matchers
-        run: |
-          echo "::add-matcher::.github/workflows/matchers/python.json"
-      - name: Run pytest
-        run: |
-          pytest \
-            -qq \
-            --durations=10 \
-            -o console_output_style=count \
-            tests
+          if [[ "${{ github.event_name }}" = "release" ]]; then
+            TAG="${{ github.event.release.tag_name}}"
+            BRANCH_BUILD="false"
+            if [[ "${{ github.event.release.prerelease }}" = "true" ]]; then
+              ENVIRONMENT="beta"
+            else
+              ENVIRONMENT="production"
+            fi
+          else
+            TAG=$(cat esphome/const.py | sed -n -E "s/^__version__\s+=\s+\"(.+)\"$/\1/p")
+            today="$(date --utc '+%Y%m%d')"
+            TAG="${TAG}${today}"
+            BRANCH=${GITHUB_REF#refs/heads/}
+            if [[ "$BRANCH" != "dev" ]]; then
+              TAG="${TAG}-${BRANCH}"
+              BRANCH_BUILD="true"
+              ENVIRONMENT=""
+            else
+              BRANCH_BUILD="false"
+              ENVIRONMENT="dev"
+            fi
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "branch_build=${BRANCH_BUILD}" >> $GITHUB_OUTPUT
+          echo "deploy_env=${ENVIRONMENT}" >> $GITHUB_OUTPUT
+        # yamllint enable rule:line-length
 
   deploy-pypi:
     name: Build and publish to PyPi
-    if: github.repository == 'esphome/esphome'
-    needs: [lint-clang-format, lint-clang-tidy, lint-python, test, pytest]
+    if: github.repository == 'esphome/esphome' && github.event_name == 'release'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4.2.2
       - name: Set up Python
-        uses: actions/setup-python@v1
+        uses: actions/setup-python@v5.6.0
         with:
-          python-version: '3.x'
-      - name: Set up python environment
-        run: |
-          script/setup
-          pip install setuptools wheel twine
+          python-version: "3.x"
       - name: Build
-        run: python setup.py sdist bdist_wheel
-      - name: Upload
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: twine upload dist/*
+        run: |-
+          pip3 install build
+          python3 -m build
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@v1.12.4
+        with:
+          skip-existing: true
 
   deploy-docker:
-    name: Build and publish docker containers
+    name: Build ESPHome ${{ matrix.platform.arch }}
     if: github.repository == 'esphome/esphome'
-    runs-on: ubuntu-latest
-    needs: [lint-clang-format, lint-clang-tidy, lint-python, test, pytest]
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ${{ matrix.platform.os }}
+    needs: [init]
     strategy:
+      fail-fast: false
       matrix:
-        arch: [amd64, armv7, aarch64]
-        build_type: ["hassio", "docker"]
+        platform:
+          - arch: amd64
+            os: "ubuntu-24.04"
+          - arch: arm64
+            os: "ubuntu-24.04-arm"
+
     steps:
-      - uses: actions/checkout@v2
-      - name: Set TAG
-        run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          echo "TAG=${TAG}" >> $GITHUB_ENV
-      - name: Set up env variables
-        run: |
-          base_version="2.6.0"
+      - uses: actions/checkout@v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
 
-          if [[ "${{ matrix.build_type }}" == "hassio" ]]; then
-            build_from="esphome/esphome-hassio-base-${{ matrix.arch }}:${base_version}"
-            build_to="esphome/esphome-hassio-${{ matrix.arch }}"
-            dockerfile="docker/Dockerfile.hassio"
-          else
-            build_from="esphome/esphome-base-${{ matrix.arch }}:${base_version}"
-            build_to="esphome/esphome-${{ matrix.arch }}"
-            dockerfile="docker/Dockerfile"
-          fi
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.11.1
 
-          if [[ "${{ github.event.release.prerelease }}" == "true" ]]; then
-            cache_tag="beta"
-          else
-            cache_tag="latest"
-          fi
-
-          # Set env variables so these values don't need to be calculated again
-          echo "BUILD_FROM=${build_from}" >> $GITHUB_ENV
-          echo "BUILD_TO=${build_to}" >> $GITHUB_ENV
-          echo "DOCKERFILE=${dockerfile}" >> $GITHUB_ENV
-          echo "CACHE_TAG=${cache_tag}" >> $GITHUB_ENV
-      - name: Pull for cache
-        run: |
-          docker pull "${BUILD_TO}:${CACHE_TAG}" || true
-      - name: Register QEMU binfmt
-        run: docker run --rm --privileged multiarch/qemu-user-static:5.0.0-2 --reset -p yes
-      - run: |
-          docker build \
-            --build-arg "BUILD_FROM=${BUILD_FROM}" \
-            --build-arg "BUILD_VERSION=${TAG}" \
-            --tag "${BUILD_TO}:${TAG}" \
-            --cache-from "${BUILD_TO}:${CACHE_TAG}" \
-            --file "${DOCKERFILE}" \
-            .
       - name: Log in to docker hub
-        env:
-          DOCKER_USER: ${{ secrets.DOCKER_USER }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-        run: docker login -u "${DOCKER_USER}" -p "${DOCKER_PASSWORD}"
-      - run: docker push "${BUILD_TO}:${TAG}"
+        uses: docker/login-action@v3.4.0
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Log in to the GitHub container registry
+        uses: docker/login-action@v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Always publish to beta tag (also full releases)
-      - name: Publish docker beta tag
-        run: |
-          docker tag "${BUILD_TO}:${TAG}" "${BUILD_TO}:beta"
-          docker push "${BUILD_TO}:beta"
+      - name: Build docker
+        uses: ./.github/actions/build-image
+        with:
+          target: final
+          build_type: docker
+          suffix: ""
+          version: ${{ needs.init.outputs.tag }}
 
-      - if: ${{ !github.event.release.prerelease }}
-        name: Publish docker latest tag
-        run: |
-          docker tag "${BUILD_TO}:${TAG}" "${BUILD_TO}:latest"
-          docker push "${BUILD_TO}:latest"
+      - name: Build ha-addon
+        uses: ./.github/actions/build-image
+        with:
+          target: final
+          build_type: ha-addon
+          suffix: "hassio"
+          version: ${{ needs.init.outputs.tag }}
 
-  deploy-docker-manifest:
-    if: github.repository == 'esphome/esphome'
+      # - name: Build lint
+      #   uses: ./.github/actions/build-image
+      #   with:
+      #     target: lint
+      #     build_type: lint
+      #     suffix: lint
+      #     version: ${{ needs.init.outputs.tag }}
+
+      - name: Upload digests
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: digests-${{ matrix.platform.arch }}
+          path: /tmp/digests
+          retention-days: 1
+
+  deploy-manifest:
+    name: Publish ESPHome ${{ matrix.image.build_type }} to ${{ matrix.registry }}
     runs-on: ubuntu-latest
-    needs: [deploy-docker]
-    steps:
-    - name: Enable experimental manifest support
-      run: |
-        mkdir -p ~/.docker
-        echo "{\"experimental\": \"enabled\"}" > ~/.docker/config.json
-    - name: Set TAG
-      run: |
-        TAG="${GITHUB_REF#refs/tags/v}"
-        echo "TAG=${TAG}" >> $GITHUB_ENV
-    - name: Log in to docker hub
-      env:
-        DOCKER_USER: ${{ secrets.DOCKER_USER }}
-        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-      run: docker login -u "${DOCKER_USER}" -p "${DOCKER_PASSWORD}"
-    - name: "Create the manifest"
-      run: |
-        docker manifest create esphome/esphome:${TAG} \
-          esphome/esphome-aarch64:${TAG} \
-          esphome/esphome-amd64:${TAG} \
-          esphome/esphome-armv7:${TAG}
-        docker manifest push esphome/esphome:${TAG}
-
-    - name: Publish docker beta tag
-      run: |
-        docker manifest create esphome/esphome:beta \
-          esphome/esphome-aarch64:${TAG} \
-          esphome/esphome-amd64:${TAG} \
-          esphome/esphome-armv7:${TAG}
-        docker manifest push esphome/esphome:beta
-
-    - name: Publish docker latest tag
-      if: ${{ !github.event.release.prerelease }}
-      run: |
-        docker manifest create esphome/esphome:latest \
-          esphome/esphome-aarch64:${TAG} \
-          esphome/esphome-amd64:${TAG} \
-          esphome/esphome-armv7:${TAG}
-        docker manifest push esphome/esphome:latest
-
-  deploy-hassio-repo:
+    needs:
+      - init
+      - deploy-docker
     if: github.repository == 'esphome/esphome'
-    runs-on: ubuntu-latest
-    needs: [deploy-docker]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - build_type: "docker"
+            suffix: ""
+          - build_type: "ha-addon"
+            suffix: "hassio"
+            # - build_type: "lint"
+            #   suffix: "lint"
+        registry:
+          - ghcr
+          - dockerhub
     steps:
-      - env:
-          TOKEN: ${{ secrets.DEPLOY_HASSIO_TOKEN }}
+      - uses: actions/checkout@v4.2.2
+
+      - name: Download digests
+        uses: actions/download-artifact@v4.3.0
+        with:
+          pattern: digests-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.11.1
+
+      - name: Log in to docker hub
+        if: matrix.registry == 'dockerhub'
+        uses: docker/login-action@v3.4.0
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Log in to the GitHub container registry
+        if: matrix.registry == 'ghcr'
+        uses: docker/login-action@v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate short tags
+        id: tags
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          curl \
-            -u ":$TOKEN" \
-            -X POST \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/esphome/hassio/actions/workflows/bump-version.yml/dispatches \
-            -d "{\"ref\":\"master\",\"inputs\":{\"version\":\"$TAG\"}}"
+          output=$(docker/generate_tags.py \
+            --tag "${{ needs.init.outputs.tag }}" \
+            --suffix "${{ matrix.image.suffix }}" \
+            --registry "${{ matrix.registry }}")
+          echo $output
+          for l in $output; do
+            echo $l >> $GITHUB_OUTPUT
+          done
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests/${{ matrix.image.build_type }}/${{ matrix.registry }}
+        run: |
+          docker buildx imagetools create $(jq -Rcnr 'inputs | . / "," | map("-t " + .) | join(" ")' <<< "${{ steps.tags.outputs.tags}}") \
+            $(printf '${{ steps.tags.outputs.image }}@sha256:%s ' *)
+
+  deploy-ha-addon-repo:
+    if: github.repository == 'esphome/esphome' && needs.init.outputs.branch_build == 'false'
+    runs-on: ubuntu-latest
+    needs:
+      - init
+      - deploy-manifest
+    steps:
+      - name: Trigger Workflow
+        uses: actions/github-script@v7.0.1
+        with:
+          github-token: ${{ secrets.DEPLOY_HA_ADDON_REPO_TOKEN }}
+          script: |
+            let description = "ESPHome";
+            if (context.eventName == "release") {
+              description = ${{ toJSON(github.event.release.body) }};
+            }
+            github.rest.actions.createWorkflowDispatch({
+              owner: "esphome",
+              repo: "home-assistant-addon",
+              workflow_id: "bump-version.yml",
+              ref: "main",
+              inputs: {
+                version: "${{ needs.init.outputs.tag }}",
+                content: description
+              }
+            })
+
+  deploy-esphome-schema:
+    if: github.repository == 'esphome/esphome' && needs.init.outputs.branch_build == 'false'
+    runs-on: ubuntu-latest
+    needs: [init]
+    environment: ${{ needs.init.outputs.deploy_env }}
+    steps:
+      - name: Trigger Workflow
+        uses: actions/github-script@v7.0.1
+        with:
+          github-token: ${{ secrets.DEPLOY_ESPHOME_SCHEMA_REPO_TOKEN }}
+          script: |
+            github.rest.actions.createWorkflowDispatch({
+              owner: "esphome",
+              repo: "esphome-schema",
+              workflow_id: "generate-schemas.yml",
+              ref: "main",
+              inputs: {
+                version: "${{ needs.init.outputs.tag }}",
+              }
+            })

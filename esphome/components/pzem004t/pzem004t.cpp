@@ -1,13 +1,23 @@
 #include "pzem004t.h"
 #include "esphome/core/log.h"
+#include "esphome/core/application.h"
+#include <cinttypes>
 
 namespace esphome {
 namespace pzem004t {
 
-static const char *TAG = "pzem004t";
+static const char *const TAG = "pzem004t";
+
+void PZEM004T::setup() {
+  // Clear UART buffer
+  while (this->available())
+    this->read();
+  // Set module address
+  this->write_state_(SET_ADDRESS);
+}
 
 void PZEM004T::loop() {
-  const uint32_t now = millis();
+  const uint32_t now = App.get_loop_component_start_time();
   if (now - this->last_read_ > 500 && this->available() < 7) {
     while (this->available())
       this->read();
@@ -67,7 +77,7 @@ void PZEM004T::loop() {
         uint32_t energy = (uint32_t(resp[1]) << 16) | (uint32_t(resp[2]) << 8) | (uint32_t(resp[3]));
         if (this->energy_sensor_ != nullptr)
           this->energy_sensor_->publish_state(energy);
-        ESP_LOGD(TAG, "Got Energy %u Wh", energy);
+        ESP_LOGD(TAG, "Got Energy %" PRIu32 " Wh", energy);
         this->write_state_(DONE);
         break;
       }

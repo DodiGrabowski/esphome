@@ -4,10 +4,9 @@
 namespace esphome {
 namespace sm16716 {
 
-static const char *TAG = "sm16716";
+static const char *const TAG = "sm16716";
 
 void SM16716::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up SM16716OutputComponent...");
   this->data_pin_->setup();
   this->data_pin_->digital_write(false);
   this->clock_pin_->setup();

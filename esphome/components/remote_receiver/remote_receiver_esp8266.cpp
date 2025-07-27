@@ -1,19 +1,20 @@
 #include "remote_receiver.h"
-#include "esphome/core/log.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/log.h"
 
-#ifdef ARDUINO_ARCH_ESP8266
+#ifdef USE_ESP8266
 
 namespace esphome {
 namespace remote_receiver {
 
-static const char *TAG = "remote_receiver.esp8266";
+static const char *const TAG = "remote_receiver.esp8266";
 
-void ICACHE_RAM_ATTR HOT RemoteReceiverComponentStore::gpio_intr(RemoteReceiverComponentStore *arg) {
+void IRAM_ATTR HOT RemoteReceiverComponentStore::gpio_intr(RemoteReceiverComponentStore *arg) {
   const uint32_t now = micros();
   // If the lhs is 1 (rising edge) we should write to an uneven index and vice versa
   const uint32_t next = (arg->buffer_write_at + 1) % arg->buffer_size;
-  const bool level = arg->pin->digital_read();
+  const bool level = arg->pin.digital_read();
   if (level != next % 2)
     return;
 
@@ -26,11 +27,10 @@ void ICACHE_RAM_ATTR HOT RemoteReceiverComponentStore::gpio_intr(RemoteReceiverC
   if (time_since_change <= arg->filter_us)
     return;
 
-  arg->buffer[arg->buffer_write_at = next] = now;
+  arg->buffer[arg->buffer_write_at = next] = now;  // NOLINT(clang-diagnostic-deprecated-volatile)
 }
 
 void RemoteReceiverComponent::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up Remote Receiver...");
   this->pin_->setup();
   auto &s = this->store_;
   s.filter_us = this->filter_us_;
@@ -53,7 +53,7 @@ void RemoteReceiverComponent::setup() {
   } else {
     s.buffer_write_at = s.buffer_read_at = 0;
   }
-  this->pin_->attach_interrupt(RemoteReceiverComponentStore::gpio_intr, &this->store_, CHANGE);
+  this->pin_->attach_interrupt(RemoteReceiverComponentStore::gpio_intr, &this->store_, gpio::INTERRUPT_ANY_EDGE);
 }
 void RemoteReceiverComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "Remote Receiver:");
@@ -62,10 +62,14 @@ void RemoteReceiverComponent::dump_config() {
     ESP_LOGW(TAG, "Remote Receiver Signal starts with a HIGH value. Usually this means you have to "
                   "invert the signal using 'inverted: True' in the pin schema!");
   }
-  ESP_LOGCONFIG(TAG, "  Buffer Size: %u", this->buffer_size_);
-  ESP_LOGCONFIG(TAG, "  Tolerance: %u%%", this->tolerance_);
-  ESP_LOGCONFIG(TAG, "  Filter out pulses shorter than: %u us", this->filter_us_);
-  ESP_LOGCONFIG(TAG, "  Signal is done after %u us of no changes", this->idle_us_);
+  ESP_LOGCONFIG(TAG,
+                "  Buffer Size: %u\n"
+                "  Tolerance: %u%s\n"
+                "  Filter out pulses shorter than: %u us\n"
+                "  Signal is done after %u us of no changes",
+                this->buffer_size_, this->tolerance_,
+                (this->tolerance_mode_ == remote_base::TOLERANCE_MODE_TIME) ? " us" : "%", this->filter_us_,
+                this->idle_us_);
 }
 
 void RemoteReceiverComponent::loop() {
@@ -78,9 +82,10 @@ void RemoteReceiverComponent::loop() {
   if (dist <= 1)
     return;
   const uint32_t now = micros();
-  if (now - s.buffer[write_at] < this->idle_us_)
+  if (now - s.buffer[write_at] < this->idle_us_) {
     // The last change was fewer than the configured idle time ago.
     return;
+  }
 
   ESP_LOGVV(TAG, "read_at=%u write_at=%u dist=%u now=%u end=%u", s.buffer_read_at, write_at, dist, now,
             s.buffer[write_at]);

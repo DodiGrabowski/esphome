@@ -4,7 +4,7 @@
 namespace esphome {
 namespace whirlpool {
 
-static const char *TAG = "whirlpool.climate";
+static const char *const TAG = "whirlpool.climate";
 
 const uint16_t WHIRLPOOL_HEADER_MARK = 9000;
 const uint16_t WHIRLPOOL_HEADER_SPACE = 4494;
@@ -33,6 +33,7 @@ const uint8_t WHIRLPOOL_SWING_MASK = 128;
 const uint8_t WHIRLPOOL_POWER = 0x04;
 
 void WhirlpoolClimate::transmit_state() {
+  this->last_transmit_time_ = millis();  // setting the time of the last transmission.
   uint8_t remote_state[WHIRLPOOL_STATE_LENGTH] = {0};
   remote_state[0] = 0x83;
   remote_state[1] = 0x06;
@@ -48,7 +49,7 @@ void WhirlpoolClimate::transmit_state() {
     this->powered_on_assumed = powered_on;
   }
   switch (this->mode) {
-    case climate::CLIMATE_MODE_AUTO:
+    case climate::CLIMATE_MODE_HEAT_COOL:
       // set fan auto
       // set temp auto temp
       // set sleep false
@@ -78,10 +79,10 @@ void WhirlpoolClimate::transmit_state() {
 
   // Temperature
   auto temp = (uint8_t) roundf(clamp(this->target_temperature, this->temperature_min_(), this->temperature_max_()));
-  remote_state[3] |= (uint8_t)(temp - this->temperature_min_()) << 4;
+  remote_state[3] |= (uint8_t) (temp - this->temperature_min_()) << 4;
 
   // Fan speed
-  switch (this->fan_mode) {
+  switch (this->fan_mode.value()) {
     case climate::CLIMATE_FAN_HIGH:
       remote_state[2] |= WHIRLPOOL_FAN_HIGH;
       break;
@@ -105,7 +106,7 @@ void WhirlpoolClimate::transmit_state() {
   }
 
   // Checksum
-  for (uint8_t i = 2; i < 12; i++)
+  for (uint8_t i = 2; i < 13; i++)
     remote_state[13] ^= remote_state[i];
   for (uint8_t i = 14; i < 20; i++)
     remote_state[20] ^= remote_state[i];
@@ -120,7 +121,7 @@ void WhirlpoolClimate::transmit_state() {
 
   // Send code
   auto transmit = this->transmitter_->transmit();
-  auto data = transmit.get_data();
+  auto *data = transmit.get_data();
 
   data->set_carrier_frequency(38000);
 
@@ -149,6 +150,12 @@ void WhirlpoolClimate::transmit_state() {
 }
 
 bool WhirlpoolClimate::on_receive(remote_base::RemoteReceiveData data) {
+  // Check if the esp isn't currently transmitting.
+  if (millis() - this->last_transmit_time_ < 500) {
+    ESP_LOGV(TAG, "Blocked receive because of current trasmittion");
+    return false;
+  }
+
   // Validate header
   if (!data.expect_item(WHIRLPOOL_HEADER_MARK, WHIRLPOOL_HEADER_SPACE)) {
     ESP_LOGV(TAG, "Header fail");
@@ -164,10 +171,10 @@ bool WhirlpoolClimate::on_receive(remote_base::RemoteReceiveData data) {
         return false;
     }
     for (int j = 0; j < 8; j++) {
-      if (data.expect_item(WHIRLPOOL_BIT_MARK, WHIRLPOOL_ONE_SPACE))
+      if (data.expect_item(WHIRLPOOL_BIT_MARK, WHIRLPOOL_ONE_SPACE)) {
         remote_state[i] |= 1 << j;
 
-      else if (!data.expect_item(WHIRLPOOL_BIT_MARK, WHIRLPOOL_ZERO_SPACE)) {
+      } else if (!data.expect_item(WHIRLPOOL_BIT_MARK, WHIRLPOOL_ZERO_SPACE)) {
         ESP_LOGV(TAG, "Byte %d bit %d fail", i, j);
         return false;
       }
@@ -184,7 +191,7 @@ bool WhirlpoolClimate::on_receive(remote_base::RemoteReceiveData data) {
   uint8_t checksum13 = 0;
   uint8_t checksum20 = 0;
   // Calculate  checksum and compare with signal value.
-  for (uint8_t i = 2; i < 12; i++)
+  for (uint8_t i = 2; i < 13; i++)
     checksum13 ^= remote_state[i];
   for (uint8_t i = 14; i < 20; i++)
     checksum20 ^= remote_state[i];
@@ -239,7 +246,7 @@ bool WhirlpoolClimate::on_receive(remote_base::RemoteReceiveData data) {
         this->mode = climate::CLIMATE_MODE_FAN_ONLY;
         break;
       case WHIRLPOOL_AUTO:
-        this->mode = climate::CLIMATE_MODE_AUTO;
+        this->mode = climate::CLIMATE_MODE_HEAT_COOL;
         break;
     }
   }

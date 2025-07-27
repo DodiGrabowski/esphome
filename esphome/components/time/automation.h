@@ -1,8 +1,12 @@
 #pragma once
 
-#include "esphome/core/component.h"
 #include "esphome/core/automation.h"
+#include "esphome/core/component.h"
+#include "esphome/core/time.h"
+
 #include "real_time_clock.h"
+
+#include <vector>
 
 namespace esphome {
 namespace time {
@@ -37,5 +41,12 @@ class CronTrigger : public Trigger<>, public Component {
   optional<ESPTime> last_check_;
 };
 
+class SyncTrigger : public Trigger<>, public Component {
+ public:
+  explicit SyncTrigger(RealTimeClock *rtc);
+
+ protected:
+  RealTimeClock *rtc_;
+};
 }  // namespace time
 }  // namespace esphome

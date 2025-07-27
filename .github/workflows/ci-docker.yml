@@ -1,55 +1,64 @@
+---
 name: CI for docker images
 
 # Only run when docker paths change
+
 on:
   push:
-    branches: [dev, beta, master]
+    branches: [dev, beta, release]
     paths:
-      - 'docker/**'
-      - '.github/workflows/**'
+      - "docker/**"
+      - ".github/workflows/ci-docker.yml"
+      - "requirements*.txt"
+      - "platformio.ini"
+      - "script/platformio_install_deps.py"
 
   pull_request:
     paths:
-      - 'docker/**'
-      - '.github/workflows/**'
+      - "docker/**"
+      - ".github/workflows/ci-docker.yml"
+      - "requirements*.txt"
+      - "platformio.ini"
+      - "script/platformio_install_deps.py"
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  # yamllint disable-line rule:line-length
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check-docker:
     name: Build docker containers
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, armv7, aarch64]
-        build_type: ["hassio", "docker"]
+        os: ["ubuntu-24.04", "ubuntu-24.04-arm"]
+        build_type:
+          - "ha-addon"
+          - "docker"
+          # - "lint"
     steps:
-      - uses: actions/checkout@v2
-      - name: Set up env variables
-        run: |
-          base_version="2.6.0"
+      - uses: actions/checkout@v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.11.1
 
-          if [[ "${{ matrix.build_type }}" == "hassio" ]]; then
-            build_from="esphome/esphome-hassio-base-${{ matrix.arch }}:${base_version}"
-            build_to="esphome/esphome-hassio-${{ matrix.arch }}"
-            dockerfile="docker/Dockerfile.hassio"
-          else
-            build_from="esphome/esphome-base-${{ matrix.arch }}:${base_version}"
-            build_to="esphome/esphome-${{ matrix.arch }}"
-            dockerfile="docker/Dockerfile"
-          fi
-
-          echo "BUILD_FROM=${build_from}" >> $GITHUB_ENV
-          echo "BUILD_TO=${build_to}" >> $GITHUB_ENV
-          echo "DOCKERFILE=${dockerfile}" >> $GITHUB_ENV
-      - name: Pull for cache
+      - name: Set TAG
         run: |
-          docker pull "${BUILD_TO}:dev" || true
-      - name: Register QEMU binfmt
-        run: docker run --rm --privileged multiarch/qemu-user-static:5.0.0-2 --reset -p yes
-      - run: |
-          docker build \
-            --build-arg "BUILD_FROM=${BUILD_FROM}" \
-            --build-arg "BUILD_VERSION=ci" \
-            --cache-from "${BUILD_TO}:dev" \
-            --file "${DOCKERFILE}" \
-            .
+          echo "TAG=check" >> $GITHUB_ENV
+
+      - name: Run build
+        run: |
+          docker/build.py \
+            --tag "${TAG}" \
+            --arch "${{ matrix.os == 'ubuntu-24.04-arm' && 'aarch64' || 'amd64' }}" \
+            --build-type "${{ matrix.build_type }}" \
+            build

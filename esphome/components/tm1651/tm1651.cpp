@@ -1,25 +1,26 @@
+#ifdef USE_ARDUINO
+
 #include "tm1651.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
 namespace esphome {
 namespace tm1651 {
 
-static const char *TAG = "tm1651.display";
+static const char *const TAG = "tm1651.display";
 
 static const uint8_t MAX_INPUT_LEVEL_PERCENT = 100;
 static const uint8_t TM1651_MAX_LEVEL = 7;
 
-static const uint8_t TM1651_BRIGHTNESS_LOW = 0;
-static const uint8_t TM1651_BRIGHTNESS_MEDIUM = 2;
-static const uint8_t TM1651_BRIGHTNESS_HIGH = 7;
+static const uint8_t TM1651_BRIGHTNESS_LOW_HW = 0;
+static const uint8_t TM1651_BRIGHTNESS_MEDIUM_HW = 2;
+static const uint8_t TM1651_BRIGHTNESS_HIGH_HW = 7;
 
 void TM1651Display::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up TM1651...");
-
   uint8_t clk = clk_pin_->get_pin();
   uint8_t dio = dio_pin_->get_pin();
 
-  battery_display_ = new TM1651(clk, dio);
+  battery_display_ = make_unique<TM1651>(clk, dio);
   battery_display_->init();
   battery_display_->clearDisplay();
 }
@@ -75,15 +76,17 @@ uint8_t TM1651Display::calculate_level_(uint8_t new_level) {
 
 uint8_t TM1651Display::calculate_brightness_(uint8_t new_brightness) {
   if (new_brightness <= 1) {
-    return TM1651_BRIGHTNESS_LOW;
+    return TM1651_BRIGHTNESS_LOW_HW;
   } else if (new_brightness == 2) {
-    return TM1651_BRIGHTNESS_MEDIUM;
+    return TM1651_BRIGHTNESS_MEDIUM_HW;
   } else if (new_brightness >= 3) {
-    return TM1651_BRIGHTNESS_HIGH;
+    return TM1651_BRIGHTNESS_HIGH_HW;
   }
 
-  return TM1651_BRIGHTNESS_LOW;
+  return TM1651_BRIGHTNESS_LOW_HW;
 }
 
 }  // namespace tm1651
 }  // namespace esphome
+
+#endif  // USE_ARDUINO

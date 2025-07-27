@@ -7,7 +7,7 @@
 #include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 
-#ifdef ARDUINO_ARCH_ESP32
+#ifdef USE_ESP32
 
 namespace esphome {
 namespace ble_scanner {
@@ -15,7 +15,7 @@ namespace ble_scanner {
 class BLEScanner : public text_sensor::TextSensor, public esp32_ble_tracker::ESPBTDeviceListener, public Component {
  public:
   bool parse_device(const esp32_ble_tracker::ESPBTDevice &device) override {
-    this->publish_state("{\"timestamp\":" + to_string(::time(NULL)) +
+    this->publish_state("{\"timestamp\":" + to_string(::time(nullptr)) +
                         ","
                         "\"address\":\"" +
                         device.address_str() +
@@ -29,7 +29,6 @@ class BLEScanner : public text_sensor::TextSensor, public esp32_ble_tracker::ESP
     return true;
   }
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::DATA; }
 };
 
 }  // namespace ble_scanner

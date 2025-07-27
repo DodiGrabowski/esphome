@@ -2,6 +2,11 @@
 
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
+#include "esphome/core/hal.h"
+#include "esphome/core/defines.h"
+#include "esphome/core/preferences.h"
+
+#include <vector>
 
 namespace esphome {
 
@@ -44,6 +49,22 @@ template<typename... Ts> class NotCondition : public Condition<Ts...> {
 
  protected:
   Condition<Ts...> *condition_;
+};
+
+template<typename... Ts> class XorCondition : public Condition<Ts...> {
+ public:
+  explicit XorCondition(const std::vector<Condition<Ts...> *> &conditions) : conditions_(conditions) {}
+  bool check(Ts... x) override {
+    size_t result = 0;
+    for (auto *condition : this->conditions_) {
+      result += condition->check(x...);
+    }
+
+    return result == 1;
+  }
+
+ protected:
+  std::vector<Condition<Ts...> *> conditions_;
 };
 
 template<typename... Ts> class LambdaCondition : public Condition<Ts...> {
@@ -93,7 +114,12 @@ class StartupTrigger : public Trigger<>, public Component {
 
 class ShutdownTrigger : public Trigger<>, public Component {
  public:
+  explicit ShutdownTrigger(float setup_priority) : setup_priority_(setup_priority) {}
   void on_shutdown() override { this->trigger(); }
+  float get_setup_priority() const override { return this->setup_priority_; }
+
+ protected:
+  float setup_priority_;
 };
 
 class LoopTrigger : public Trigger<>, public Component {
@@ -101,6 +127,27 @@ class LoopTrigger : public Trigger<>, public Component {
   void loop() override { this->trigger(); }
   float get_setup_priority() const override { return setup_priority::DATA; }
 };
+
+#ifdef ESPHOME_PROJECT_NAME
+class ProjectUpdateTrigger : public Trigger<std::string>, public Component {
+ public:
+  void setup() override {
+    uint32_t hash = fnv1_hash(ESPHOME_PROJECT_NAME);
+    ESPPreferenceObject pref = global_preferences->make_preference<char[30]>(hash, true);
+    char previous_version[30];
+    char current_version[30] = ESPHOME_PROJECT_VERSION_30;
+    if (pref.load(&previous_version)) {
+      int cmp = strcmp(previous_version, current_version);
+      if (cmp < 0) {
+        this->trigger(previous_version);
+      }
+    }
+    pref.save(&current_version);
+    global_preferences->sync();
+  }
+  float get_setup_priority() const override { return setup_priority::PROCESSOR; }
+};
+#endif
 
 template<typename... Ts> class DelayAction : public Action<Ts...>, public Component {
  public:
@@ -111,14 +158,14 @@ template<typename... Ts> class DelayAction : public Action<Ts...>, public Compon
   void play_complex(Ts... x) override {
     auto f = std::bind(&DelayAction<Ts...>::play_next_, this, x...);
     this->num_running_++;
-    this->set_timeout(this->delay_.value(x...), f);
+    this->set_timeout("delay", this->delay_.value(x...), f);
   }
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
   void play(Ts... x) override { /* ignore - see play_complex */
   }
 
-  void stop() override { this->cancel_timeout(""); }
+  void stop() override { this->cancel_timeout("delay"); }
 };
 
 template<typename... Ts> class LambdaAction : public Action<Ts...> {
@@ -224,9 +271,47 @@ template<typename... Ts> class WhileAction : public Action<Ts...> {
   std::tuple<Ts...> var_{};
 };
 
+template<typename... Ts> class RepeatAction : public Action<Ts...> {
+ public:
+  TEMPLATABLE_VALUE(uint32_t, count)
+
+  void add_then(const std::vector<Action<uint32_t, Ts...> *> &actions) {
+    this->then_.add_actions(actions);
+    this->then_.add_action(new LambdaAction<uint32_t, Ts...>([this](uint32_t iteration, Ts... x) {
+      iteration++;
+      if (iteration >= this->count_.value(x...)) {
+        this->play_next_tuple_(this->var_);
+      } else {
+        this->then_.play(iteration, x...);
+      }
+    }));
+  }
+
+  void play_complex(Ts... x) override {
+    this->num_running_++;
+    this->var_ = std::make_tuple(x...);
+    if (this->count_.value(x...) > 0) {
+      this->then_.play(0, x...);
+    } else {
+      this->play_next_tuple_(this->var_);
+    }
+  }
+
+  void play(Ts... x) override { /* ignore - see play_complex */
+  }
+
+  void stop() override { this->then_.stop(); }
+
+ protected:
+  ActionList<uint32_t, Ts...> then_;
+  std::tuple<Ts...> var_;
+};
+
 template<typename... Ts> class WaitUntilAction : public Action<Ts...>, public Component {
  public:
   WaitUntilAction(Condition<Ts...> *condition) : condition_(condition) {}
+
+  TEMPLATABLE_VALUE(uint32_t, timeout_value)
 
   void play_complex(Ts... x) override {
     this->num_running_++;
@@ -238,6 +323,12 @@ template<typename... Ts> class WaitUntilAction : public Action<Ts...>, public Co
       return;
     }
     this->var_ = std::make_tuple(x...);
+
+    if (this->timeout_value_.has_value()) {
+      auto f = std::bind(&WaitUntilAction<Ts...>::play_next_, this, x...);
+      this->set_timeout("timeout", this->timeout_value_.value(x...), f);
+    }
+
     this->loop();
   }
 
@@ -249,6 +340,8 @@ template<typename... Ts> class WaitUntilAction : public Action<Ts...>, public Co
       return;
     }
 
+    this->cancel_timeout("timeout");
+
     this->play_next_tuple_(this->var_);
   }
 
@@ -256,6 +349,8 @@ template<typename... Ts> class WaitUntilAction : public Action<Ts...>, public Co
 
   void play(Ts... x) override { /* ignore - see play_complex */
   }
+
+  void stop() override { this->cancel_timeout("timeout"); }
 
  protected:
   Condition<Ts...> *condition_;
@@ -266,7 +361,45 @@ template<typename... Ts> class UpdateComponentAction : public Action<Ts...> {
  public:
   UpdateComponentAction(PollingComponent *component) : component_(component) {}
 
-  void play(Ts... x) override { this->component_->update(); }
+  void play(Ts... x) override {
+    if (!this->component_->is_ready())
+      return;
+    this->component_->update();
+  }
+
+ protected:
+  PollingComponent *component_;
+};
+
+template<typename... Ts> class SuspendComponentAction : public Action<Ts...> {
+ public:
+  SuspendComponentAction(PollingComponent *component) : component_(component) {}
+
+  void play(Ts... x) override {
+    if (!this->component_->is_ready())
+      return;
+    this->component_->stop_poller();
+  }
+
+ protected:
+  PollingComponent *component_;
+};
+
+template<typename... Ts> class ResumeComponentAction : public Action<Ts...> {
+ public:
+  ResumeComponentAction(PollingComponent *component) : component_(component) {}
+  TEMPLATABLE_VALUE(uint32_t, update_interval)
+
+  void play(Ts... x) override {
+    if (!this->component_->is_ready()) {
+      return;
+    }
+    optional<uint32_t> update_interval = this->update_interval_.optional_value(x...);
+    if (update_interval.has_value()) {
+      this->component_->set_update_interval(update_interval.value());
+    }
+    this->component_->start_poller();
+  }
 
  protected:
   PollingComponent *component_;

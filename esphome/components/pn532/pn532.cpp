@@ -1,5 +1,8 @@
 #include "pn532.h"
+
+#include <memory>
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h"
 
 // Based on:
 // - https://cdn-shop.adafruit.com/datasheets/PN532C106_Application+Note_v1.2.pdf
@@ -9,32 +12,21 @@
 namespace esphome {
 namespace pn532 {
 
-static const char *TAG = "pn532";
-
-std::string format_uid(std::vector<uint8_t> &uid) {
-  char buf[32];
-  int offset = 0;
-  for (uint8_t i = 0; i < uid.size(); i++) {
-    const char *format = "%02X";
-    if (i + 1 < uid.size())
-      format = "%02X-";
-    offset += sprintf(buf + offset, format, uid[i]);
-  }
-  return std::string(buf);
-}
+static const char *const TAG = "pn532";
 
 void PN532::setup() {
-  ESP_LOGCONFIG(TAG, "Setting up PN532...");
-
   // Get version data
   if (!this->write_command_({PN532_COMMAND_VERSION_DATA})) {
-    ESP_LOGE(TAG, "Error sending version command");
-    this->mark_failed();
-    return;
+    ESP_LOGW(TAG, "Error sending version command, trying again");
+    if (!this->write_command_({PN532_COMMAND_VERSION_DATA})) {
+      ESP_LOGE(TAG, "Error sending version command");
+      this->mark_failed();
+      return;
+    }
   }
 
   std::vector<uint8_t> version_data;
-  if (!this->read_response_(PN532_COMMAND_VERSION_DATA, version_data)) {
+  if (!this->read_response(PN532_COMMAND_VERSION_DATA, version_data)) {
     ESP_LOGE(TAG, "Error getting version");
     this->mark_failed();
     return;
@@ -54,14 +46,14 @@ void PN532::setup() {
   }
 
   std::vector<uint8_t> wakeup_result;
-  if (!this->read_response_(PN532_COMMAND_SAMCONFIGURATION, wakeup_result)) {
+  if (!this->read_response(PN532_COMMAND_SAMCONFIGURATION, wakeup_result)) {
     this->error_code_ = WAKEUP_FAILED;
     this->mark_failed();
     return;
   }
 
   // Set up SAM (secure access module)
-  uint8_t sam_timeout = std::min(255u, this->update_interval_ / 50);
+  uint8_t sam_timeout = std::min<uint8_t>(255u, this->update_interval_ / 50);
   if (!this->write_command_({
           PN532_COMMAND_SAMCONFIGURATION,
           0x01,         // normal mode
@@ -74,7 +66,7 @@ void PN532::setup() {
   }
 
   std::vector<uint8_t> sam_result;
-  if (!this->read_response_(PN532_COMMAND_SAMCONFIGURATION, sam_result)) {
+  if (!this->read_response(PN532_COMMAND_SAMCONFIGURATION, sam_result)) {
     ESP_LOGV(TAG, "Invalid SAM result: (%u)", sam_result.size());  // NOLINT
     for (uint8_t dat : sam_result) {
       ESP_LOGV(TAG, " 0x%02X", dat);
@@ -87,7 +79,32 @@ void PN532::setup() {
   this->turn_off_rf_();
 }
 
+bool PN532::powerdown() {
+  updates_enabled_ = false;
+  requested_read_ = false;
+  ESP_LOGI(TAG, "Powering down PN532");
+  if (!this->write_command_({PN532_COMMAND_POWERDOWN, 0b10100000})) {  // enable i2c,spi wakeup
+    ESP_LOGE(TAG, "Error writing powerdown command to PN532");
+    return false;
+  }
+  std::vector<uint8_t> response;
+  if (!this->read_response(PN532_COMMAND_POWERDOWN, response)) {
+    ESP_LOGE(TAG, "Error reading PN532 powerdown response");
+    return false;
+  }
+  if (response[0] != 0x00) {
+    ESP_LOGE(TAG, "Error on PN532 powerdown: %02x", response[0]);
+    return false;
+  }
+  ESP_LOGV(TAG, "Powerdown successful");
+  delay(1);
+  return true;
+}
+
 void PN532::update() {
+  if (!updates_enabled_)
+    return;
+
   for (auto *obj : this->binary_sensors_)
     obj->on_scan_end();
 
@@ -108,13 +125,28 @@ void PN532::loop() {
   if (!this->requested_read_)
     return;
 
+  auto ready = this->read_ready_(false);
+  if (ready == WOULDBLOCK)
+    return;
+
+  bool success = false;
   std::vector<uint8_t> read;
-  bool success = this->read_response_(PN532_COMMAND_INLISTPASSIVETARGET, read);
+
+  if (ready == READY) {
+    success = this->read_response(PN532_COMMAND_INLISTPASSIVETARGET, read);
+  } else {
+    this->send_ack_();  // abort still running InListPassiveTarget
+  }
 
   this->requested_read_ = false;
 
   if (!success) {
     // Something failed
+    if (!this->current_uid_.empty()) {
+      auto tag = make_unique<nfc::NfcTag>(this->current_uid_);
+      for (auto *trigger : this->triggers_ontagremoved_)
+        trigger->process(tag);
+    }
     this->current_uid_ = {};
     this->turn_off_rf_();
     return;
@@ -123,6 +155,11 @@ void PN532::loop() {
   uint8_t num_targets = read[0];
   if (num_targets != 1) {
     // no tags found or too many
+    if (!this->current_uid_.empty()) {
+      auto tag = make_unique<nfc::NfcTag>(this->current_uid_);
+      for (auto *trigger : this->triggers_ontagremoved_)
+        trigger->process(tag);
+    }
     this->current_uid_ = {};
     this->turn_off_rf_();
     return;
@@ -143,32 +180,65 @@ void PN532::loop() {
   }
 
   if (nfcid.size() == this->current_uid_.size()) {
-    bool same_uid = false;
-    for (uint8_t i = 0; i < nfcid.size(); i++)
-      same_uid |= nfcid[i] == this->current_uid_[i];
+    bool same_uid = true;
+    for (size_t i = 0; i < nfcid.size(); i++)
+      same_uid &= nfcid[i] == this->current_uid_[i];
     if (same_uid)
       return;
   }
 
   this->current_uid_ = nfcid;
 
-  for (auto *trigger : this->triggers_)
-    trigger->process(nfcid);
+  if (next_task_ == READ) {
+    auto tag = this->read_tag_(nfcid);
+    for (auto *trigger : this->triggers_ontag_)
+      trigger->process(tag);
 
-  if (report) {
-    ESP_LOGD(TAG, "Found new tag '%s'", format_uid(nfcid).c_str());
+    if (report) {
+      ESP_LOGD(TAG, "Found new tag '%s'", nfc::format_uid(nfcid).c_str());
+      if (tag->has_ndef_message()) {
+        const auto &message = tag->get_ndef_message();
+        const auto &records = message->get_records();
+        ESP_LOGD(TAG, "  NDEF formatted records:");
+        for (const auto &record : records) {
+          ESP_LOGD(TAG, "    %s - %s", record->get_type().c_str(), record->get_payload().c_str());
+        }
+      }
+    }
+  } else if (next_task_ == CLEAN) {
+    ESP_LOGD(TAG, "  Tag cleaning");
+    if (!this->clean_tag_(nfcid)) {
+      ESP_LOGE(TAG, "  Tag was not fully cleaned successfully");
+    }
+    ESP_LOGD(TAG, "  Tag cleaned!");
+  } else if (next_task_ == FORMAT) {
+    ESP_LOGD(TAG, "  Tag formatting");
+    if (!this->format_tag_(nfcid)) {
+      ESP_LOGE(TAG, "Error formatting tag as NDEF");
+    }
+    ESP_LOGD(TAG, "  Tag formatted!");
+  } else if (next_task_ == WRITE) {
+    if (this->next_task_message_to_write_ != nullptr) {
+      ESP_LOGD(TAG, "  Tag writing");
+      ESP_LOGD(TAG, "  Tag formatting");
+      if (!this->format_tag_(nfcid)) {
+        ESP_LOGE(TAG, "  Tag could not be formatted for writing");
+      } else {
+        ESP_LOGD(TAG, "  Writing NDEF data");
+        if (!this->write_tag_(nfcid, this->next_task_message_to_write_)) {
+          ESP_LOGE(TAG, "  Failed to write message to tag");
+        }
+        ESP_LOGD(TAG, "  Finished writing NDEF data");
+        delete this->next_task_message_to_write_;
+        this->next_task_message_to_write_ = nullptr;
+        this->on_finished_write_callback_.call();
+      }
+    }
   }
 
-  this->turn_off_rf_();
-}
+  this->read_mode();
 
-void PN532::turn_off_rf_() {
-  ESP_LOGVV(TAG, "Turning RF field OFF");
-  this->write_command_({
-      PN532_COMMAND_RFCONFIGURATION,
-      0x1,  // RF Field
-      0x0   // Off
-  });
+  this->turn_off_rf_();
 }
 
 bool PN532::write_command_(const std::vector<uint8_t> &data) {
@@ -208,99 +278,8 @@ bool PN532::write_command_(const std::vector<uint8_t> &data) {
   return this->read_ack_();
 }
 
-bool PN532::read_response_(uint8_t command, std::vector<uint8_t> &data) {
-  ESP_LOGV(TAG, "Reading response");
-  uint8_t len = this->read_response_length_();
-  if (len == 0) {
-    return false;
-  }
-
-  ESP_LOGV(TAG, "Reading response of length %d", len);
-  if (!this->read_data(data, 6 + len + 2)) {
-    ESP_LOGD(TAG, "No response data");
-    return false;
-  }
-
-  if (data[1] != 0x00 && data[2] != 0x00 && data[3] != 0xFF) {
-    // invalid packet
-    ESP_LOGV(TAG, "read data invalid preamble!");
-    return false;
-  }
-
-  bool valid_header = (static_cast<uint8_t>(data[4] + data[5]) == 0 &&  // LCS, len + lcs = 0
-                       data[6] == 0xD5 &&                               // TFI - frame from PN532 to system controller
-                       data[7] == command + 1);                         // Correct command response
-
-  if (!valid_header) {
-    ESP_LOGV(TAG, "read data invalid header!");
-    return false;
-  }
-
-  data.erase(data.begin(), data.begin() + 6);  // Remove headers
-
-  uint8_t checksum = 0;
-  for (int i = 0; i < len + 1; i++) {
-    uint8_t dat = data[i];
-    checksum += dat;
-  }
-  checksum = ~checksum + 1;
-
-  if (data[len + 1] != checksum) {
-    ESP_LOGV(TAG, "read data invalid checksum! %02X != %02X", data[len], checksum);
-    return false;
-  }
-
-  if (data[len + 2] != 0x00) {
-    ESP_LOGV(TAG, "read data invalid postamble!");
-    return false;
-  }
-
-  data.erase(data.begin(), data.begin() + 2);  // Remove TFI and command code
-  data.erase(data.end() - 2, data.end());      // Remove checksum and postamble
-
-#ifdef ESPHOME_LOG_HAS_VERY_VERBOSE
-  ESP_LOGD(TAG, "PN532 Data Frame: (%u)", data.size());  // NOLINT
-  for (uint8_t dat : data) {
-    ESP_LOGD(TAG, "  0x%02X", dat);
-  }
-#endif
-
-  return true;
-}
-
-uint8_t PN532::read_response_length_() {
-  std::vector<uint8_t> data;
-  if (!this->read_data(data, 6)) {
-    return 0;
-  }
-
-  if (data[1] != 0x00 && data[2] != 0x00 && data[3] != 0xFF) {
-    // invalid packet
-    ESP_LOGV(TAG, "read data invalid preamble!");
-    return 0;
-  }
-
-  bool valid_header = (static_cast<uint8_t>(data[4] + data[5]) == 0 &&  // LCS, len + lcs = 0
-                       data[6] == 0xD5);                                // TFI - frame from PN532 to system controller
-
-  if (!valid_header) {
-    ESP_LOGV(TAG, "read data invalid header!");
-    return 0;
-  }
-
-  this->write_data({0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00});  // NACK - Retransmit last message
-
-  // full length of message, including TFI
-  uint8_t full_len = data[4];
-  // length of data, excluding TFI
-  uint8_t len = full_len - 1;
-  if (full_len == 0)
-    len = 0;
-  return len;
-}
-
 bool PN532::read_ack_() {
-  ESP_LOGVV(TAG, "Reading ACK...");
+  ESP_LOGV(TAG, "Reading ACK");
 
   std::vector<uint8_t> data;
   if (!this->read_data(data, 6)) {
@@ -311,8 +290,137 @@ bool PN532::read_ack_() {
                   data[2] == 0x00 &&                     // start of packet
                   data[3] == 0xFF && data[4] == 0x00 &&  // ACK packet code
                   data[5] == 0xFF && data[6] == 0x00);   // postamble
-  ESP_LOGVV(TAG, "ACK valid: %s", YESNO(matches));
+  ESP_LOGV(TAG, "ACK valid: %s", YESNO(matches));
   return matches;
+}
+
+void PN532::send_ack_() {
+  ESP_LOGV(TAG, "Sending ACK for abort");
+  this->write_data({0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00});
+  delay(10);
+}
+void PN532::send_nack_() {
+  ESP_LOGV(TAG, "Sending NACK for retransmit");
+  this->write_data({0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00});
+  delay(10);
+}
+
+enum PN532ReadReady PN532::read_ready_(bool block) {
+  if (this->rd_ready_ == READY) {
+    if (block) {
+      this->rd_start_time_ = 0;
+      this->rd_ready_ = WOULDBLOCK;
+    }
+    return READY;
+  }
+
+  if (!this->rd_start_time_) {
+    this->rd_start_time_ = millis();
+  }
+
+  while (true) {
+    if (this->is_read_ready()) {
+      this->rd_ready_ = READY;
+      break;
+    }
+
+    if (millis() - this->rd_start_time_ > 100) {
+      ESP_LOGV(TAG, "Timed out waiting for readiness from PN532!");
+      this->rd_ready_ = TIMEOUT;
+      break;
+    }
+
+    if (!block) {
+      this->rd_ready_ = WOULDBLOCK;
+      break;
+    }
+
+    yield();
+  }
+
+  auto rdy = this->rd_ready_;
+  if (block || rdy == TIMEOUT) {
+    this->rd_start_time_ = 0;
+    this->rd_ready_ = WOULDBLOCK;
+  }
+  return rdy;
+}
+
+void PN532::turn_off_rf_() {
+  ESP_LOGV(TAG, "Turning RF field OFF");
+  this->write_command_({
+      PN532_COMMAND_RFCONFIGURATION,
+      0x01,  // RF Field
+      0x00,  // Off
+  });
+}
+
+std::unique_ptr<nfc::NfcTag> PN532::read_tag_(std::vector<uint8_t> &uid) {
+  uint8_t type = nfc::guess_tag_type(uid.size());
+
+  if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
+    ESP_LOGD(TAG, "Mifare classic");
+    return this->read_mifare_classic_tag_(uid);
+  } else if (type == nfc::TAG_TYPE_2) {
+    ESP_LOGD(TAG, "Mifare ultralight");
+    return this->read_mifare_ultralight_tag_(uid);
+  } else if (type == nfc::TAG_TYPE_UNKNOWN) {
+    ESP_LOGV(TAG, "Cannot determine tag type");
+    return make_unique<nfc::NfcTag>(uid);
+  } else {
+    return make_unique<nfc::NfcTag>(uid);
+  }
+}
+
+void PN532::read_mode() {
+  this->next_task_ = READ;
+  ESP_LOGD(TAG, "Waiting to read next tag");
+}
+void PN532::clean_mode() {
+  this->next_task_ = CLEAN;
+  ESP_LOGD(TAG, "Waiting to clean next tag");
+}
+void PN532::format_mode() {
+  this->next_task_ = FORMAT;
+  ESP_LOGD(TAG, "Waiting to format next tag");
+}
+void PN532::write_mode(nfc::NdefMessage *message) {
+  this->next_task_ = WRITE;
+  this->next_task_message_to_write_ = message;
+  ESP_LOGD(TAG, "Waiting to write next tag");
+}
+
+bool PN532::clean_tag_(std::vector<uint8_t> &uid) {
+  uint8_t type = nfc::guess_tag_type(uid.size());
+  if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
+    return this->format_mifare_classic_mifare_(uid);
+  } else if (type == nfc::TAG_TYPE_2) {
+    return this->clean_mifare_ultralight_();
+  }
+  ESP_LOGE(TAG, "Unsupported Tag for formatting");
+  return false;
+}
+
+bool PN532::format_tag_(std::vector<uint8_t> &uid) {
+  uint8_t type = nfc::guess_tag_type(uid.size());
+  if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
+    return this->format_mifare_classic_ndef_(uid);
+  } else if (type == nfc::TAG_TYPE_2) {
+    return this->clean_mifare_ultralight_();
+  }
+  ESP_LOGE(TAG, "Unsupported Tag for formatting");
+  return false;
+}
+
+bool PN532::write_tag_(std::vector<uint8_t> &uid, nfc::NdefMessage *message) {
+  uint8_t type = nfc::guess_tag_type(uid.size());
+  if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
+    return this->write_mifare_classic_tag_(uid, message);
+  } else if (type == nfc::TAG_TYPE_2) {
+    return this->write_mifare_ultralight_tag_(uid, message);
+  }
+  ESP_LOGE(TAG, "Unsupported Tag for formatting");
+  return false;
 }
 
 float PN532::get_setup_priority() const { return setup_priority::DATA; }
@@ -341,7 +449,7 @@ bool PN532BinarySensor::process(std::vector<uint8_t> &data) {
   if (data.size() != this->uid_.size())
     return false;
 
-  for (uint8_t i = 0; i < data.size(); i++) {
+  for (size_t i = 0; i < data.size(); i++) {
     if (data[i] != this->uid_[i])
       return false;
   }
@@ -350,7 +458,6 @@ bool PN532BinarySensor::process(std::vector<uint8_t> &data) {
   this->found_ = true;
   return true;
 }
-void PN532Trigger::process(std::vector<uint8_t> &data) { this->trigger(format_uid(data)); }
 
 }  // namespace pn532
 }  // namespace esphome

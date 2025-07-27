@@ -1,6 +1,14 @@
 #pragma once
 
+#include "esphome/core/defines.h"
+
+#ifdef USE_MQTT
+
+#include <memory>
+
 #include "esphome/core/component.h"
+#include "esphome/core/entity_base.h"
+#include "esphome/core/string_ref.h"
 #include "mqtt_client.h"
 
 namespace esphome {
@@ -26,7 +34,7 @@ struct SendDiscoveryConfig {
 \
  public: \
   void set_custom_##name##_##type##_topic(const std::string &topic) { this->custom_##name##_##type##_topic_ = topic; } \
-  const std::string get_##name##_##type##_topic() const { \
+  std::string get_##name##_##type##_topic() const { \
     if (this->custom_##name##_##type##_topic_.empty()) \
       return this->get_default_topic_for_(#name "/" #type); \
     return this->custom_##name##_##type##_topic_; \
@@ -60,12 +68,18 @@ class MQTTComponent : public Component {
 
   void call_loop() override;
 
+  void call_dump_config() override;
+
   /// Send discovery info the Home Assistant, override this.
-  virtual void send_discovery(JsonObject &root, SendDiscoveryConfig &config) = 0;
+  virtual void send_discovery(JsonObject root, SendDiscoveryConfig &config) = 0;
 
   virtual bool send_initial_state() = 0;
 
-  virtual bool is_internal() = 0;
+  virtual bool is_internal();
+
+  /// Set QOS for state messages.
+  void set_qos(uint8_t qos);
+  uint8_t get_qos() const;
 
   /// Set whether state message should be retained.
   void set_retain(bool retain);
@@ -75,13 +89,18 @@ class MQTTComponent : public Component {
   void disable_discovery();
   bool is_discovery_enabled() const;
 
+  /// Set the QOS for subscribe messages (used in discovery).
+  void set_subscribe_qos(uint8_t qos);
+
   /// Override this method to return the component type (e.g. "light", "sensor", ...)
   virtual std::string component_type() const = 0;
 
   /// Set a custom state topic. Set to "" for default behavior.
-  void set_custom_state_topic(const std::string &custom_state_topic);
+  void set_custom_state_topic(const char *custom_state_topic);
   /// Set a custom command topic. Set to "" for default behavior.
-  void set_custom_command_topic(const std::string &custom_command_topic);
+  void set_custom_command_topic(const char *custom_command_topic);
+  /// Set whether command message should be retained.
+  void set_command_retain(bool command_retain);
 
   /// MQTT_COMPONENT setup priority.
   float get_setup_priority() const override;
@@ -127,7 +146,7 @@ class MQTTComponent : public Component {
    * received.
    * @param qos The MQTT quality of service. Defaults to 0.
    */
-  void subscribe_json(const std::string &topic, mqtt_json_callback_t callback, uint8_t qos = 0);
+  void subscribe_json(const std::string &topic, const mqtt_json_callback_t &callback, uint8_t qos = 0);
 
  protected:
   /// Helper method to get the discovery topic for this component.
@@ -140,21 +159,25 @@ class MQTTComponent : public Component {
    */
   std::string get_default_topic_for_(const std::string &suffix) const;
 
-  /// Get the friendly name of this MQTT component.
-  virtual std::string friendly_name() const = 0;
-
-  /** A unique ID for this MQTT component, empty for no unique id. See unique ID requirements:
-   * https://developers.home-assistant.io/docs/en/entity_registry_index.html#unique-id-requirements
-   *
-   * @return The unique id as a string.
+  /**
+   * Gets the Entity served by this MQTT component.
    */
-  virtual std::string unique_id();
+  virtual const EntityBase *get_entity() const = 0;
+
+  /// Get the friendly name of this MQTT component.
+  virtual std::string friendly_name() const;
+
+  /// Get the icon field of this component
+  virtual std::string get_icon() const;
+
+  /// Get whether the underlying Entity is disabled by default
+  virtual bool is_disabled_by_default() const;
 
   /// Get the MQTT topic that new states will be shared to.
-  const std::string get_state_topic_() const;
+  std::string get_state_topic_() const;
 
   /// Get the MQTT topic for listening to commands.
-  const std::string get_command_topic_() const;
+  std::string get_command_topic_() const;
 
   bool is_connected_() const;
 
@@ -166,14 +189,23 @@ class MQTTComponent : public Component {
   /// Generate the Home Assistant MQTT discovery object id by automatically transforming the friendly name.
   std::string get_default_object_id_() const;
 
- protected:
-  std::string custom_state_topic_{};
-  std::string custom_command_topic_{};
+  StringRef custom_state_topic_{};
+  StringRef custom_command_topic_{};
+
+  std::unique_ptr<Availability> availability_;
+
+  bool has_custom_state_topic_{false};
+  bool has_custom_command_topic_{false};
+
+  bool command_retain_{false};
   bool retain_{true};
+  uint8_t qos_{0};
+  uint8_t subscribe_qos_{0};
   bool discovery_enabled_{true};
-  Availability *availability_{nullptr};
   bool resend_state_{false};
 };
 
 }  // namespace mqtt
 }  // namespace esphome
+
+#endif  // USE_MQTt

@@ -1,12 +1,19 @@
+#ifdef USE_ARDUINO
+
 #include "wled_light_effect.h"
+#include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
-#ifdef ARDUINO_ARCH_ESP32
+#ifdef USE_ESP32
 #include <WiFi.h>
 #endif
 
-#ifdef ARDUINO_ARCH_ESP8266
+#ifdef USE_ESP8266
 #include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
+#endif
+
+#ifdef USE_BK72XX
 #include <WiFiUdp.h>
 #endif
 
@@ -19,14 +26,18 @@ enum Protocol { WLED_NOTIFIER = 0, WARLS = 1, DRGB = 2, DRGBW = 3, DNRGB = 4 };
 
 const int DEFAULT_BLANK_TIME = 1000;
 
-static const char *TAG = "wled_light_effect";
+static const char *const TAG = "wled_light_effect";
 
 WLEDLightEffect::WLEDLightEffect(const std::string &name) : AddressableLightEffect(name) {}
 
 void WLEDLightEffect::start() {
   AddressableLightEffect::start();
 
-  blank_at_ = 0;
+  if (this->blank_on_start_) {
+    this->blank_at_ = 0;
+  } else {
+    this->blank_at_ = UINT32_MAX;
+  }
 }
 
 void WLEDLightEffect::stop() {
@@ -40,14 +51,15 @@ void WLEDLightEffect::stop() {
 
 void WLEDLightEffect::blank_all_leds_(light::AddressableLight &it) {
   for (int led = it.size(); led-- > 0;) {
-    it[led].set(light::ESPColor::BLACK);
+    it[led].set(Color::BLACK);
   }
+  it.schedule_show();
 }
 
-void WLEDLightEffect::apply(light::AddressableLight &it, const light::ESPColor &current_color) {
+void WLEDLightEffect::apply(light::AddressableLight &it, const Color &current_color) {
   // Init UDP lazily
   if (!udp_) {
-    udp_.reset(new WiFiUDP());
+    udp_ = make_unique<WiFiUDP>();
 
     if (!udp_->begin(port_)) {
       ESP_LOGW(TAG, "Cannot bind WLEDLightEffect to %d.", port_);
@@ -92,8 +104,17 @@ bool WLEDLightEffect::parse_frame_(light::AddressableLight &it, const uint8_t *p
 
   switch (protocol) {
     case WLED_NOTIFIER:
-      if (!parse_notifier_frame_(it, payload, size))
-        return false;
+      // Hyperion Port
+      if (port_ == 19446) {
+        if (!parse_drgb_frame_(it, payload, size))
+          return false;
+      } else {
+        if (!parse_notifier_frame_(it, payload, size)) {
+          return false;
+        } else {
+          timeout = UINT8_MAX;
+        }
+      }
       break;
 
     case WARLS:
@@ -128,12 +149,37 @@ bool WLEDLightEffect::parse_frame_(light::AddressableLight &it, const uint8_t *p
     blank_at_ = millis() + DEFAULT_BLANK_TIME;
   }
 
+  it.schedule_show();
   return true;
 }
 
 bool WLEDLightEffect::parse_notifier_frame_(light::AddressableLight &it, const uint8_t *payload, uint16_t size) {
-  // Packet needs to be empty
-  return size == 0;
+  // Receive at least RGBW and Brightness for all LEDs from WLED Sync Notification
+  // https://kno.wled.ge/interfaces/udp-notifier/
+  // https://github.com/Aircoookie/WLED/blob/main/wled00/udp.cpp
+
+  if (size < 34) {
+    return false;
+  }
+
+  uint8_t payload_sync_group_mask = payload[34];
+
+  if (this->sync_group_mask_ && !(payload_sync_group_mask & this->sync_group_mask_)) {
+    ESP_LOGD(TAG, "sync group mask does not match");
+    return false;
+  }
+
+  uint8_t bri = payload[0];
+  uint8_t r = esp_scale8(payload[1], bri);
+  uint8_t g = esp_scale8(payload[2], bri);
+  uint8_t b = esp_scale8(payload[3], bri);
+  uint8_t w = esp_scale8(payload[8], bri);
+
+  for (auto &&led : it) {
+    led.set(Color(r, g, b, w));
+  }
+
+  return true;
 }
 
 bool WLEDLightEffect::parse_warls_frame_(light::AddressableLight &it, const uint8_t *payload, uint16_t size) {
@@ -152,7 +198,7 @@ bool WLEDLightEffect::parse_warls_frame_(light::AddressableLight &it, const uint
     uint8_t b = payload[3];
 
     if (led < max_leds) {
-      it[led].set(light::ESPColor(r, g, b));
+      it[led].set(Color(r, g, b));
     }
   }
 
@@ -174,7 +220,7 @@ bool WLEDLightEffect::parse_drgb_frame_(light::AddressableLight &it, const uint8
     uint8_t b = payload[2];
 
     if (led < max_leds) {
-      it[led].set(light::ESPColor(r, g, b));
+      it[led].set(Color(r, g, b));
     }
   }
 
@@ -197,7 +243,7 @@ bool WLEDLightEffect::parse_drgbw_frame_(light::AddressableLight &it, const uint
     uint8_t w = payload[3];
 
     if (led < max_leds) {
-      it[led].set(light::ESPColor(r, g, b, w));
+      it[led].set(Color(r, g, b, w));
     }
   }
 
@@ -228,7 +274,7 @@ bool WLEDLightEffect::parse_dnrgb_frame_(light::AddressableLight &it, const uint
     uint8_t b = payload[2];
 
     if (led < max_leds) {
-      it[led].set(light::ESPColor(r, g, b));
+      it[led].set(Color(r, g, b));
     }
   }
 
@@ -237,3 +283,5 @@ bool WLEDLightEffect::parse_dnrgb_frame_(light::AddressableLight &it, const uint
 
 }  // namespace wled
 }  // namespace esphome
+
+#endif  // USE_ARDUINO

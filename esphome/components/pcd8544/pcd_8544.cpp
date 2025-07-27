@@ -1,12 +1,12 @@
 #include "pcd_8544.h"
-#include "esphome/core/log.h"
 #include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/log.h"
 
 namespace esphome {
 namespace pcd8544 {
 
-static const char *TAG = "pcd_8544";
+static const char *const TAG = "pcd_8544";
 
 void PCD8544::setup_pins_() {
   this->spi_setup();

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/time.h"
+
 #include "esphome/components/sun/sun.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 
@@ -15,11 +17,12 @@ class SunTextSensor : public text_sensor::TextSensor, public PollingComponent {
   void set_format(const std::string &format) { format_ = format; }
 
   void update() override {
-    optional<time::ESPTime> res;
-    if (this->sunrise_)
+    optional<ESPTime> res;
+    if (this->sunrise_) {
       res = this->parent_->sunrise(this->elevation_);
-    else
+    } else {
       res = this->parent_->sunset(this->elevation_);
+    }
     if (!res) {
       this->publish_state("");
       return;
